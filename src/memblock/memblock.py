@@ -1,0 +1,358 @@
+"""MemBlock — the main facade class composing all SDK components."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from memblock.block import Block
+from memblock.context import ContextBuilder
+from memblock.crypto import CryptoLayerWithPassphrase
+from memblock.decay import DecayEngine
+from memblock.graph import GraphIndex
+from memblock.ops import OpLog, TamperReport
+from memblock.query import QueryEngine
+from memblock.schema import SchemaValidationError
+from memblock.storage.sqlite import SQLiteAdapter
+from memblock.store import BlockStore
+from memblock.types import (
+    BlockType,
+    EdgeRelation,
+    EncryptionLevel,
+    SourceType,
+)
+
+
+class MemBlock:
+    """
+    Main entry point for the MemBlock SDK.
+
+    Composes: BlockStore + GraphIndex + CryptoLayer + DecayEngine +
+              QueryEngine + ContextBuilder into a single clean API.
+
+    Usage:
+        mem = MemBlock(storage="sqlite:///./memory.db")
+
+        block = mem.store("User prefers Python", type=BlockType.PREFERENCE)
+        mem.link(block.id, other.id, relation=EdgeRelation.SUPPORTS)
+        results = mem.query(type=BlockType.PREFERENCE)
+        context = mem.build_context(query="user preferences", token_budget=4000)
+        mem.verify()
+    """
+
+    def __init__(
+        self,
+        storage: str = "sqlite:///:memory:",
+        encryption_key: str | None = None,
+        author: str = "agent",
+    ) -> None:
+        """
+        Initialize MemBlock.
+
+        Args:
+            storage: Storage URI. Currently supports:
+                - "sqlite:///path/to/db.sqlite" (file-based)
+                - "sqlite:///:memory:" (in-memory, default)
+            encryption_key: Passphrase for AES-256 encryption. None = no encryption.
+            author: Default author for operations.
+        """
+        # Parse storage URI
+        self._storage = self._create_storage(storage)
+        self._storage.initialize()
+
+        # Compose components
+        self._crypto = CryptoLayerWithPassphrase(key=encryption_key)
+        self._store = BlockStore(self._storage, author=author)
+        self._graph = GraphIndex(self._storage, self._store.op_log)
+        self._decay = DecayEngine(self._storage)
+        self._query = QueryEngine(self._storage, self._graph, self._decay)
+        self._context = ContextBuilder(self._storage, self._query, self._graph, self._decay)
+
+    @staticmethod
+    def _create_storage(uri: str) -> SQLiteAdapter:
+        """Create a storage adapter from a URI string."""
+        if uri.startswith("sqlite:///"):
+            db_path = uri[len("sqlite:///"):]
+            return SQLiteAdapter(db_path)
+        elif uri.startswith("sqlite://"):
+            db_path = uri[len("sqlite://"):]
+            return SQLiteAdapter(db_path)
+        else:
+            # Default to SQLite with the URI as path
+            return SQLiteAdapter(uri)
+
+    # ─── Store Operations ─────────────────────────────────────────────────
+
+    def store(
+        self,
+        content: str,
+        type: BlockType = BlockType.FACT,
+        confidence: float = 1.0,
+        source: SourceType = SourceType.EXPLICIT,
+        tags: list[str] | None = None,
+        parent_id: str | None = None,
+        encryption_level: EncryptionLevel = EncryptionLevel.NONE,
+        decay_rate: float = 0.01,
+        ttl: int | None = None,
+    ) -> Block:
+        """
+        Store a new memory block.
+
+        Args:
+            content: The memory content text
+            type: Block type (FACT, PREFERENCE, EVENT, ENTITY, RELATION)
+            confidence: Confidence score (0.0-1.0)
+            source: How the memory was acquired
+            tags: Categorization tags
+            parent_id: Parent block ID for tree structure
+            encryption_level: NONE, STANDARD, or SENSITIVE
+            decay_rate: How fast this memory fades (0 = never)
+            ttl: Time-to-live in seconds (None = permanent)
+
+        Returns:
+            The created Block.
+        """
+        # Encrypt if needed
+        stored_content = content
+        encrypted = False
+        if encryption_level != EncryptionLevel.NONE and self._crypto.enabled:
+            stored_content = self._crypto.seal(content, encryption_level)
+            encrypted = True
+
+        block = self._store.create(
+            content=stored_content,
+            type=type,
+            confidence=confidence,
+            source=source,
+            tags=tags,
+            parent_id=parent_id,
+            encryption_level=encryption_level,
+            decay_rate=decay_rate,
+            ttl=ttl,
+        )
+
+        if encrypted:
+            self._storage.update_block(block.id, {"encrypted": True})
+            block.encrypted = True
+
+        return block
+
+    def get(self, block_id: str, decrypt: bool = True) -> Block | None:
+        """
+        Retrieve a block by ID.
+
+        Automatically decrypts content if encrypted and key is available.
+        """
+        block = self._store.get(block_id)
+        if block is None:
+            return None
+
+        if decrypt and block.encrypted and self._crypto.enabled:
+            block.content = self._crypto.open(block.content, block.encryption_level)
+
+        return block
+
+    def update(self, block_id: str, **updates: Any) -> Block | None:
+        """Update a block's fields."""
+        # If updating content and block is encrypted, encrypt the new content
+        if "content" in updates:
+            block = self._store.get_without_touch(block_id)
+            if block and block.encrypted and self._crypto.enabled:
+                updates["content"] = self._crypto.seal(
+                    updates["content"], block.encryption_level
+                )
+
+        return self._store.update(block_id, **updates)
+
+    def delete(self, block_id: str, cascade: bool = False) -> bool:
+        """Soft-delete a block."""
+        return self._store.delete(block_id, cascade=cascade)
+
+    # ─── Graph Operations ─────────────────────────────────────────────────
+
+    def link(
+        self,
+        source_id: str,
+        target_id: str,
+        relation: EdgeRelation | str = EdgeRelation.RELATED_TO,
+        weight: float = 1.0,
+    ) -> None:
+        """Create a relationship between two blocks."""
+        if isinstance(relation, str):
+            relation = EdgeRelation(relation)
+        self._graph.link(source_id, target_id, relation, weight)
+
+    def unlink(
+        self,
+        source_id: str,
+        target_id: str,
+        relation: EdgeRelation | str | None = None,
+    ) -> int:
+        """Remove relationship(s) between two blocks."""
+        if isinstance(relation, str):
+            relation = EdgeRelation(relation)
+        return self._graph.unlink(source_id, target_id, relation)
+
+    def neighbors(self, block_id: str, relation: EdgeRelation | None = None) -> list[Block]:
+        """Get blocks directly connected to a block."""
+        return self._graph.neighbors(block_id, relation=relation)
+
+    def traverse(self, block_id: str, max_depth: int = 3) -> list[Block]:
+        """Walk the graph from a block, returning all connected blocks."""
+        return self._graph.traverse(block_id, max_depth=max_depth)
+
+    # ─── Query ────────────────────────────────────────────────────────────
+
+    def query(
+        self,
+        type: BlockType | None = None,
+        tags: list[str] | None = None,
+        text_search: str | None = None,
+        related_to: str | None = None,
+        min_confidence: float = 0.0,
+        sort_by: str = "relevance",
+        limit: int = 10,
+    ) -> list[Block]:
+        """
+        Query memory blocks with structured filters.
+
+        Args:
+            type: Filter by block type
+            tags: Filter by tags (match any)
+            text_search: Full-text search
+            related_to: Block ID — find graph-connected blocks
+            min_confidence: Minimum confidence threshold
+            sort_by: 'relevance', 'recency', 'access_count', 'strength'
+            limit: Maximum results
+
+        Returns:
+            List of matching blocks.
+        """
+        return self._query.query(
+            type=type,
+            tags=tags,
+            text_search=text_search,
+            related_to=related_to,
+            min_confidence=min_confidence,
+            sort_by=sort_by,
+            limit=limit,
+        )
+
+    # ─── Context Builder ──────────────────────────────────────────────────
+
+    def build_context(
+        self,
+        query: str | None = None,
+        token_budget: int = 4000,
+        strategy: str = "relevance",
+        include_metadata: bool = True,
+    ) -> str:
+        """
+        Build LLM-ready context from relevant memory blocks.
+
+        Args:
+            query: What to search for
+            token_budget: Maximum tokens in output
+            strategy: 'relevance', 'graph_walk', or 'type_grouped'
+            include_metadata: Include confidence/source in output
+
+        Returns:
+            Formatted string for LLM context injection.
+        """
+        return self._context.build_context(
+            query=query,
+            token_budget=token_budget,
+            strategy=strategy,
+            include_metadata=include_metadata,
+        )
+
+    # ─── Integrity ────────────────────────────────────────────────────────
+
+    def verify(self) -> TamperReport:
+        """
+        Verify the integrity of the operation log hash chain.
+
+        Returns a TamperReport indicating if any tampering was detected.
+        """
+        return self._store.op_log.verify()
+
+    # ─── Decay & Maintenance ──────────────────────────────────────────────
+
+    def prune(self, min_strength: float = 0.1) -> list[Block]:
+        """Remove decayed memories below the strength threshold."""
+        return self._decay.prune(min_strength=min_strength)
+
+    def strongest(self, limit: int = 10) -> list[tuple[Block, float]]:
+        """Get the strongest memories."""
+        return self._decay.get_strongest(limit=limit)
+
+    def weakest(self, limit: int = 10) -> list[tuple[Block, float]]:
+        """Get the weakest memories (candidates for pruning)."""
+        return self._decay.get_weakest(limit=limit)
+
+    # ─── Export ───────────────────────────────────────────────────────────
+
+    def export_markdown(self) -> str:
+        """Export all memories as human-readable markdown."""
+        blocks = self._storage.get_all_blocks()
+        lines = ["# MemBlock Export", ""]
+
+        for block in blocks:
+            lines.append(f"## [{block.type.value.upper()}] {block.content[:80]}")
+            lines.append(f"- **ID**: {block.id}")
+            lines.append(f"- **Confidence**: {block.metadata.confidence:.2f}")
+            lines.append(f"- **Source**: {block.metadata.source.value}")
+            lines.append(f"- **Created**: {block.metadata.created_at.isoformat()}")
+            lines.append(f"- **Access Count**: {block.metadata.access_count}")
+            lines.append(f"- **Tags**: {', '.join(block.tags) if block.tags else 'none'}")
+
+            edges = self._storage.get_edges(block.id)
+            if edges:
+                lines.append(f"- **Edges**:")
+                for edge in edges:
+                    direction = "→" if edge.source_id == block.id else "←"
+                    other_id = edge.target_id if edge.source_id == block.id else edge.source_id
+                    lines.append(f"  - {direction} {edge.relation.value} {other_id} (w={edge.weight})")
+
+            lines.append("")
+
+        return "\n".join(lines)
+
+    # ─── Stats ────────────────────────────────────────────────────────────
+
+    def stats(self) -> dict[str, Any]:
+        """Get statistics about the memory store."""
+        blocks = self._storage.get_all_blocks()
+        all_blocks = self._storage.get_all_blocks(include_deleted=True)
+
+        type_counts: dict[str, int] = {}
+        for b in blocks:
+            key = b.type.value
+            type_counts[key] = type_counts.get(key, 0) + 1
+
+        total_edges = 0
+        for b in blocks:
+            total_edges += len(self._storage.get_edges(b.id, direction="outgoing"))
+
+        return {
+            "total_blocks": len(blocks),
+            "deleted_blocks": len(all_blocks) - len(blocks),
+            "blocks_by_type": type_counts,
+            "total_edges": total_edges,
+            "total_operations": len(self._storage.get_operations()),
+        }
+
+    # ─── Lifecycle ────────────────────────────────────────────────────────
+
+    def close(self) -> None:
+        """Close the storage connection."""
+        self._storage.close()
+
+    def __enter__(self) -> MemBlock:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        stats = self.stats()
+        return f"MemBlock(blocks={stats['total_blocks']}, edges={stats['total_edges']})"
