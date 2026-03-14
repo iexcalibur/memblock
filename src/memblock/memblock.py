@@ -12,6 +12,7 @@ from memblock.graph import GraphIndex
 from memblock.ops import OpLog, TamperReport
 from memblock.query import QueryEngine
 from memblock.schema import SchemaValidationError
+from memblock.storage.base import StorageAdapter
 from memblock.storage.sqlite import SQLiteAdapter
 from memblock.store import BlockStore
 from memblock.types import (
@@ -30,7 +31,14 @@ class MemBlock:
               QueryEngine + ContextBuilder into a single clean API.
 
     Usage:
+        # SQLite (local)
         mem = MemBlock(storage="sqlite:///./memory.db")
+
+        # PostgreSQL (production, multi-user)
+        mem = MemBlock(
+            storage="postgresql://user:pass@localhost:5432/mydb",
+            user_id="u_123",
+        )
 
         block = mem.store("User prefers Python", type=BlockType.PREFERENCE)
         mem.link(block.id, other.id, relation=EdgeRelation.SUPPORTS)
@@ -44,19 +52,25 @@ class MemBlock:
         storage: str = "sqlite:///:memory:",
         encryption_key: str | None = None,
         author: str = "agent",
+        user_id: str = "default",
     ) -> None:
         """
         Initialize MemBlock.
 
         Args:
-            storage: Storage URI. Currently supports:
+            storage: Storage URI. Supports:
                 - "sqlite:///path/to/db.sqlite" (file-based)
                 - "sqlite:///:memory:" (in-memory, default)
+                - "postgresql://user:pass@host:port/db" (PostgreSQL)
+                - "postgres://user:pass@host:port/db" (alias)
             encryption_key: Passphrase for AES-256 encryption. None = no encryption.
             author: Default author for operations.
+            user_id: User ID for multi-tenant PostgreSQL deployments.
         """
+        self._user_id = user_id
+
         # Parse storage URI
-        self._storage = self._create_storage(storage)
+        self._storage = self._create_storage(storage, user_id)
         self._storage.initialize()
 
         # Compose components
@@ -68,9 +82,18 @@ class MemBlock:
         self._context = ContextBuilder(self._storage, self._query, self._graph, self._decay)
 
     @staticmethod
-    def _create_storage(uri: str) -> SQLiteAdapter:
+    def _create_storage(uri: str, user_id: str = "default") -> StorageAdapter:
         """Create a storage adapter from a URI string."""
-        if uri.startswith("sqlite:///"):
+        if uri.startswith("postgresql://") or uri.startswith("postgres://"):
+            try:
+                from memblock.storage.postgresql import PostgreSQLAdapter
+            except ImportError:
+                raise ImportError(
+                    "PostgreSQL adapter requires psycopg. "
+                    "Install with: pip install memblock[postgres]"
+                )
+            return PostgreSQLAdapter(dsn=uri, user_id=user_id)
+        elif uri.startswith("sqlite:///"):
             db_path = uri[len("sqlite:///"):]
             return SQLiteAdapter(db_path)
         elif uri.startswith("sqlite://"):
@@ -264,6 +287,96 @@ class MemBlock:
             strategy=strategy,
             include_metadata=include_metadata,
         )
+
+    # ─── Auto-Extraction ─────────────────────────────────────────────────
+
+    def extract(
+        self,
+        conversation: str,
+        provider: str = "openai",
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+    ) -> Any:
+        """
+        Auto-extract memory blocks from a conversation using an LLM.
+
+        Args:
+            conversation: The conversation text
+            provider: "openai", "anthropic", or "custom"
+            api_key: API key for the provider
+            model: Model name (default: gpt-4o-mini for openai, claude-sonnet-4-20250514 for anthropic)
+            base_url: Custom base URL (for OpenAI-compatible APIs)
+
+        Returns:
+            ExtractionResult with created block IDs.
+
+        Requires: pip install memblock[llm]
+        """
+        from memblock.extraction import (
+            LLMExtractor,
+            OpenAIProvider,
+            AnthropicProvider,
+            ExtractionResult,
+        )
+
+        if api_key is None:
+            raise ValueError("api_key is required for auto-extraction")
+
+        if provider == "openai":
+            llm_provider = OpenAIProvider(
+                api_key=api_key,
+                model=model or "gpt-4o-mini",
+                base_url=base_url,
+            )
+        elif provider == "anthropic":
+            llm_provider = AnthropicProvider(
+                api_key=api_key,
+                model=model or "claude-sonnet-4-20250514",
+            )
+        else:
+            raise ValueError(f"Unknown provider: {provider}. Use 'openai' or 'anthropic'.")
+
+        extractor = LLMExtractor(provider=llm_provider)
+        return extractor.extract(conversation, memblock=self)
+
+    def extract_messages(
+        self,
+        messages: list[dict[str, str]],
+        provider: str = "openai",
+        api_key: str | None = None,
+        model: str | None = None,
+    ) -> Any:
+        """
+        Auto-extract from a list of message dicts.
+
+        Args:
+            messages: [{"role": "user", "content": "..."}, ...]
+            provider: "openai" or "anthropic"
+            api_key: API key
+            model: Model name
+
+        Returns:
+            ExtractionResult
+        """
+        from memblock.extraction import (
+            LLMExtractor,
+            OpenAIProvider,
+            AnthropicProvider,
+        )
+
+        if api_key is None:
+            raise ValueError("api_key is required for auto-extraction")
+
+        if provider == "openai":
+            llm_provider = OpenAIProvider(api_key=api_key, model=model or "gpt-4o-mini")
+        elif provider == "anthropic":
+            llm_provider = AnthropicProvider(api_key=api_key, model=model or "claude-sonnet-4-20250514")
+        else:
+            raise ValueError(f"Unknown provider: {provider}")
+
+        extractor = LLMExtractor(provider=llm_provider)
+        return extractor.extract_from_messages(messages, memblock=self)
 
     # ─── Integrity ────────────────────────────────────────────────────────
 
