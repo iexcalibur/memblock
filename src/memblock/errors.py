@@ -41,3 +41,8 @@ class ExtractionError(MemBlockError):
 class EncryptionError(MemBlockError):
     """Raised when encryption or decryption fails."""
     pass
+
+
+class LicenseError(MemBlockError):
+    """Raised when license validation fails (missing, expired, or tampered)."""
+    pass

@@ -96,7 +96,12 @@ class BlockStore:
         block.version = 1
 
         # Persist
-        self.storage.save_block(block)
+        try:
+            self.storage.save_block(block)
+        except (StorageError, SchemaValidationError):
+            raise
+        except Exception as e:
+            raise StorageError(f"Failed to save block {block.id}: {e}") from e
         return block
 
     def get(self, block_id: str) -> Block | None:
@@ -105,17 +110,27 @@ class BlockStore:
 
         Increments access_count and updates last_accessed.
         """
-        block = self.storage.get_block(block_id)
+        try:
+            block = self.storage.get_block(block_id)
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(f"Failed to retrieve block {block_id}: {e}") from e
         if block is None or block.deleted:
             return None
 
         # Touch — update access stats
         block.metadata.access_count += 1
         block.metadata.last_accessed = now_utc()
-        self.storage.update_block(block_id, {
-            "access_count": block.metadata.access_count,
-            "last_accessed": block.metadata.last_accessed,
-        })
+        try:
+            self.storage.update_block(block_id, {
+                "access_count": block.metadata.access_count,
+                "last_accessed": block.metadata.last_accessed,
+            })
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(f"Failed to update access stats for block {block_id}: {e}") from e
 
         return block
 
@@ -178,7 +193,12 @@ class BlockStore:
         update_dict = dict(updates)
         update_dict["version"] = block.version
         update_dict["op_hash"] = block.op_hash
-        self.storage.update_block(block_id, update_dict)
+        try:
+            self.storage.update_block(block_id, update_dict)
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(f"Failed to update block {block_id}: {e}") from e
 
         return block
 
@@ -189,7 +209,12 @@ class BlockStore:
         cascade=True: also deletes all children recursively.
         cascade=False: reparents children to deleted block's parent.
         """
-        block = self.storage.get_block(block_id)
+        try:
+            block = self.storage.get_block(block_id)
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(f"Failed to retrieve block {block_id} for deletion: {e}") from e
         if block is None:
             return False
 
@@ -225,12 +250,17 @@ class BlockStore:
 
     def hard_delete(self, block_id: str) -> bool:
         """Permanently remove a block from storage."""
-        block = self.storage.get_block(block_id)
-        if block is None:
-            return False
+        try:
+            block = self.storage.get_block(block_id)
+            if block is None:
+                return False
 
-        self.storage.delete_edges_for_block(block_id)
-        self.storage.delete_block(block_id)
+            self.storage.delete_edges_for_block(block_id)
+            self.storage.delete_block(block_id)
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(f"Failed to hard-delete block {block_id}: {e}") from e
         return True
 
     # ─── Tree Operations ──────────────────────────────────────────────────

@@ -1,237 +1,73 @@
 # MemBlock
 
-Structured memory SDK for AI agents — full developer control over what gets stored, how it's organized, and how it's retrieved.
+**MemBlock** is a private, local-first memory SDK for AI applications.
 
-## Install
+It is built for teams and individuals who want fast, controllable memory without depending on a required cloud memory backend.
 
+> Current distribution model: **invite-only / private access only** (not public PyPI).
+
+---
+
+## What is MemBlock?
+
+MemBlock stores and retrieves context blocks for LLM-driven applications (assistants, copilots, automation agents) from your own database.  
+It gives you:
+
+- Reliable storage (SQLite / PostgreSQL)
+- Deterministic retrieval APIs
+- Deduplication (exact + semantic)
+- Auto-extraction (optional)
+- CLI utilities for ops
+- Local license activation for controlled distribution
+
+---
+
+## Why MemBlock?
+
+### 1) Local-first + owned data
+Your data stays in your own DB. No dependency on a mandatory external memory service.
+
+### 2) Developer-controlled
+Everything runs through a Python SDK with a clear API surface and minimal infra assumptions.
+
+### 3) Practical for production pipelines
+Schema migration support, stable errors, tests, and CLI-first workflows make rollout easier than experimental scripts.
+
+### 4) Cost-efficient
+No forced cloud spend for baseline memory features.
+
+### 5) Private and controlled distribution
+Built for “approved users only” with install + runtime controls.
+
+---
+
+## Why choose MemBlock over common cloud memory defaults?
+
+Compared with typical cloud-first memory layers, MemBlock is designed for control-first teams:
+
+- **Data control:** your DB, your retention, your access policy
+- **No vendor lock-in:** move/migrate using your own storage
+- **Private deployment:** no open-source/public install path
+- **Predictable behavior:** versioned storage + deterministic APIs
+- **Configurable rules:** dedup, extraction, CLI actions, error handling
+
+---
+
+## How it works
+
+1. You create blocks by storing content/messages.
+2. Blocks are optionally de-duplicated before persisting.
+3. Blocks are tagged/typed/confidence-scored and indexed in your DB.
+4. You query by text/search filters for recall.
+5. Optional background/interval extraction enriches memory from chat streams.
+6. Runtime operations are validated via license state before use.
+
+---
+
+## Installation (invite-only)
+
+MemBlock is distributed privately (example flows below):
+
+### Private GitHub release asset
 ```bash
-pip install memblock
-
-# Optional extras
-pip install memblock[embeddings]       # Local semantic search
-pip install memblock[embeddings-openai] # OpenAI embeddings
-pip install memblock[llm]              # LLM auto-extraction
-pip install memblock[postgres]         # PostgreSQL support
-pip install memblock[all]              # Everything
-```
-
-## Quick Start
-
-```python
-from memblock import MemBlock, BlockType, SourceType, EdgeRelation
-
-mem = MemBlock(storage="sqlite:///./memory.db")
-
-# Store memories
-python_block = mem.store(
-    content="User is a senior Python developer",
-    type=BlockType.FACT,
-    confidence=0.95,
-    source=SourceType.EXPLICIT,
-    tags=["skills", "python"],
-)
-
-django_block = mem.store(
-    content="Prefers Django over Flask for web projects",
-    type=BlockType.PREFERENCE,
-    confidence=0.8,
-    tags=["framework", "web"],
-)
-
-# Link memories into a knowledge graph
-mem.link(django_block.id, python_block.id, relation=EdgeRelation.ABOUT)
-
-# Query
-results = mem.query(type=BlockType.PREFERENCE, tags=["web"])
-results = mem.query(text_search="Python developer")
-
-# Build LLM context (stays within token budget)
-context = mem.build_context(query="user tech preferences", token_budget=2000)
-
-# Check integrity
-report = mem.verify()
-
-mem.close()
-```
-
-## Semantic Search
-
-Enable embeddings for meaning-based search:
-
-```python
-# Local embeddings (no API key needed)
-mem = MemBlock(storage="sqlite:///./memory.db", embeddings=True)
-
-# Or OpenAI embeddings
-mem = MemBlock(
-    storage="sqlite:///./memory.db",
-    embeddings="openai",
-    embeddings_api_key="sk-...",
-)
-
-mem.store("I enjoy building web apps with Django", type=BlockType.PREFERENCE)
-
-# Finds the block even though "framework" isn't in the stored text
-results = mem.query(text_search="favorite web framework")
-```
-
-## Encryption
-
-Per-block encryption with three levels:
-
-```python
-from memblock import EncryptionLevel
-
-mem = MemBlock(
-    storage="sqlite:///./memory.db",
-    encryption_key="your-secret-passphrase",
-)
-
-mem.store(
-    content="User's API key is sk-abc123",
-    type=BlockType.FACT,
-    encryption_level=EncryptionLevel.STANDARD,
-)
-
-mem.store(
-    content="SSN: 123-45-6789",
-    type=BlockType.FACT,
-    encryption_level=EncryptionLevel.SENSITIVE,
-)
-
-# Retrieval auto-decrypts
-block = mem.get(block_id)
-print(block.content)  # plaintext
-```
-
-## Knowledge Graph
-
-```python
-# Link memories with typed relationships
-mem.link(a.id, b.id, relation=EdgeRelation.SUPPORTS)
-mem.link(a.id, b.id, relation=EdgeRelation.CONTRADICTS)
-mem.link(a.id, b.id, relation=EdgeRelation.CAUSED_BY)
-
-# Traverse the graph
-neighbors = mem.neighbors(block.id)
-connected = mem.traverse(block.id, max_depth=3)
-
-# Query with graph context
-results = mem.query(text_search="Python", related_to=entity_block.id)
-```
-
-## Memory Decay
-
-Memories fade over time unless accessed. Prune weak ones automatically:
-
-```python
-strong = mem.strongest(limit=5)   # [(block, strength), ...]
-weak = mem.weakest(limit=5)
-pruned = mem.prune(min_strength=0.1)
-```
-
-## Context Builder
-
-Build token-budgeted context strings for LLM prompts:
-
-```python
-context = mem.build_context(query="user preferences", token_budget=4000, strategy="relevance")
-context = mem.build_context(query="user preferences", token_budget=4000, strategy="graph_walk")
-context = mem.build_context(query="user preferences", token_budget=4000, strategy="type_grouped")
-```
-
-## Deduplication
-
-Prevent duplicate memories with configurable policies:
-
-```python
-mem = MemBlock(storage="sqlite:///./memory.db", on_duplicate="error")           # Raise on duplicate
-mem = MemBlock(storage="sqlite:///./memory.db", on_duplicate="skip")            # Silently skip
-mem = MemBlock(storage="sqlite:///./memory.db", on_duplicate="return_existing") # Return original
-mem = MemBlock(storage="sqlite:///./memory.db", on_duplicate="merge")           # Merge tags & confidence
-```
-
-## Auto-Extraction
-
-Extract structured memories from conversations using an LLM:
-
-```python
-# One-shot extraction (requires: pip install memblock[llm])
-result = mem.extract(
-    conversation="User said they love Python and have been using Django for 3 years",
-    provider="openai",
-    api_key="sk-...",
-)
-
-# Opt-in streaming — buffer messages, extract periodically
-mem = MemBlock(
-    storage="sqlite:///./memory.db",
-    auto_extract=True,
-    extract_provider="openai",
-    extract_api_key="sk-...",
-    extract_every=10,
-)
-mem.add_message("user", "I've been coding in Rust lately")
-mem.add_message("assistant", "Rust is great for systems programming!")
-# ... extraction triggers every 10 messages, or flush manually:
-result = mem.flush_extraction()
-```
-
-## PostgreSQL (Multi-Tenant)
-
-```python
-# Requires: pip install memblock[postgres]
-mem = MemBlock(
-    storage="postgresql://user:pass@localhost:5432/mydb",
-    user_id="user_123",
-    embeddings=True,
-)
-
-mem.store("User prefers dark mode", type=BlockType.PREFERENCE)
-
-# Different user, same database — fully isolated
-mem2 = MemBlock(
-    storage="postgresql://user:pass@localhost:5432/mydb",
-    user_id="user_456",
-)
-```
-
-## CLI
-
-```bash
-memblock init --db sqlite:///./memory.db
-memblock query "Python developer"
-memblock query --type preference --tags web --json
-memblock stats
-memblock export --format json --output memories.json
-memblock prune --min-strength 0.1 --dry-run
-memblock reindex
-memblock version
-```
-
-## Block Types
-
-| Type | Use For |
-|------|---------|
-| `FACT` | Objective information ("User is 28 years old") |
-| `PREFERENCE` | Subjective choices ("Prefers dark mode") |
-| `EVENT` | Things that happened ("Deployed v2.0 on March 1") |
-| `ENTITY` | Named things ("Project Alpha", "John Smith") |
-| `RELATION` | Connections between things ("John works at Acme") |
-
-## Edge Relations
-
-| Relation | Meaning |
-|----------|---------|
-| `ABOUT` | This block is about that entity |
-| `SUPPORTS` | This evidence supports that claim |
-| `CONTRADICTS` | This conflicts with that |
-| `CAUSED_BY` | This was caused by that event |
-| `RELATED_TO` | General relationship |
-| `PART_OF` | This is a component of that |
-| `DERIVED_FROM` | This was derived from that source |
-| `SUPERSEDES` | This replaces that (newer info) |
-
-## License
-
-MIT
+pip install "https://<TOKEN>@github.com/<org>/<repo>/releases/download/v0.2.0/memblock-0.2.0-py3-none-any.whl"

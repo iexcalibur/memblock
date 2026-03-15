@@ -151,3 +151,88 @@ class TestContentHashPersistence:
         retrieved = mem.get(block.id)
         assert retrieved.content_hash == block.content_hash
         mem.close()
+
+
+class TestSemanticDedup:
+    """Test semantic (embedding-based) near-duplicate detection."""
+
+    def test_semantic_dedup_catches_near_duplicate(self):
+        from unittest.mock import MagicMock
+        from memblock.dedup import DuplicateChecker
+        from memblock.block import Block
+        from memblock.embeddings import pack_embedding
+
+        # Mock storage with one existing block
+        storage = MagicMock()
+        storage.get_block_by_content_hash.return_value = None  # No exact match
+
+        existing_block = Block(id="blk_existing", content="User likes Python")
+        storage.get_block.return_value = existing_block
+
+        # Mock embedding provider that returns similar vectors
+        embed_provider = MagicMock()
+        # Query vector
+        embed_provider.embed.return_value = [[0.9, 0.1, 0.0]]
+        # Stored vector is very similar
+        stored_vec = [0.91, 0.09, 0.01]
+        storage.get_all_embeddings.return_value = [
+            ("blk_existing", pack_embedding(stored_vec)),
+        ]
+
+        checker = DuplicateChecker(
+            storage, embedding_provider=embed_provider, similarity_threshold=0.95
+        )
+        result = checker.check("User enjoys Python programming", "different_hash")
+        assert result is not None
+        assert result.id == "blk_existing"
+
+    def test_semantic_dedup_allows_different_content(self):
+        from unittest.mock import MagicMock
+        from memblock.dedup import DuplicateChecker
+        from memblock.embeddings import pack_embedding
+
+        storage = MagicMock()
+        storage.get_block_by_content_hash.return_value = None
+
+        embed_provider = MagicMock()
+        # Query vector
+        embed_provider.embed.return_value = [[1.0, 0.0, 0.0]]
+        # Stored vector is very different (orthogonal)
+        stored_vec = [0.0, 1.0, 0.0]
+        storage.get_all_embeddings.return_value = [
+            ("blk_other", pack_embedding(stored_vec)),
+        ]
+
+        checker = DuplicateChecker(
+            storage, embedding_provider=embed_provider, similarity_threshold=0.95
+        )
+        result = checker.check("Completely different topic", "different_hash")
+        assert result is None
+
+    def test_semantic_dedup_skipped_without_embeddings(self):
+        from unittest.mock import MagicMock
+        from memblock.dedup import DuplicateChecker
+
+        storage = MagicMock()
+        storage.get_block_by_content_hash.return_value = None
+
+        checker = DuplicateChecker(storage, embedding_provider=None)
+        result = checker.check("some content", "some_hash")
+        assert result is None
+
+    def test_semantic_dedup_graceful_on_embed_failure(self):
+        from unittest.mock import MagicMock
+        from memblock.dedup import DuplicateChecker
+
+        storage = MagicMock()
+        storage.get_block_by_content_hash.return_value = None
+
+        embed_provider = MagicMock()
+        embed_provider.embed.side_effect = RuntimeError("API down")
+
+        checker = DuplicateChecker(
+            storage, embedding_provider=embed_provider, similarity_threshold=0.95
+        )
+        # Should not raise, just return None
+        result = checker.check("some content", "some_hash")
+        assert result is None

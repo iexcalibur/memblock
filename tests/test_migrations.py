@@ -220,3 +220,141 @@ class TestMigrationRunner:
         assert len(MIGRATIONS) == SCHEMA_VERSION - 1
         for i, m in enumerate(MIGRATIONS):
             assert m.version == i + 2
+
+    def test_failed_migration_rolls_back(self):
+        """A migration failure should roll back and raise MigrationError."""
+        adapter = SQLiteAdapter(":memory:")
+        adapter.initialize()
+
+        # Manually set version back to 1 to force migrations to re-run
+        adapter.conn.execute("UPDATE schema_version SET version = 1")
+        adapter.conn.commit()
+
+        # Patch migration 2 to fail
+        original_up = MIGRATIONS[0].up_sqlite
+        MIGRATIONS[0].up_sqlite = lambda cur: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            with pytest.raises(MigrationError, match="failed"):
+                MigrationRunner(adapter).run()
+
+            # Version should still be 1 (rolled back)
+            cur = adapter.conn.cursor()
+            cur.execute("SELECT version FROM schema_version LIMIT 1")
+            assert cur.fetchone()[0] == 1
+        finally:
+            MIGRATIONS[0].up_sqlite = original_up
+            adapter.close()
+
+
+class TestPostgreSQLMigrationPaths:
+    """Test PostgreSQL migration paths using mocks (no real DB needed)."""
+
+    def _make_mock_adapter(self):
+        """Create a mock adapter that behaves like PostgreSQLAdapter."""
+        from unittest.mock import MagicMock
+
+        adapter = MagicMock()
+        adapter.adapter_type = "postgresql"
+        adapter.schema = "public"
+
+        # Mock cursor as a context manager
+        cursor = MagicMock()
+        adapter.conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        adapter.conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        return adapter, cursor
+
+    def test_postgres_future_version_guard(self):
+        """PostgreSQL: version > SCHEMA_VERSION should raise MigrationError."""
+        adapter, cursor = self._make_mock_adapter()
+
+        cursor.fetchone.side_effect = [
+            {"exists": True},       # has_version_table
+            {"version": 999},       # current_version
+            None,                   # advisory_unlock
+        ]
+
+        with pytest.raises(MigrationError, match="newer than supported"):
+            MigrationRunner(adapter).run()
+
+    def test_postgres_v010_detection_valid(self):
+        """PostgreSQL: v0.1.0 DB with valid columns should migrate."""
+        adapter, cursor = self._make_mock_adapter()
+
+        # No version table, has blocks table, valid columns
+        cursor.fetchone.side_effect = [
+            {"exists": False},       # no version table
+            {"exists": True},        # has blocks table
+            None,                    # advisory_unlock
+        ]
+        # First fetchall: column validation; second: backfill query (no existing rows)
+        cursor.fetchall.side_effect = [
+            [
+                {"column_name": "id"},
+                {"column_name": "type"},
+                {"column_name": "content"},
+                {"column_name": "created_at"},
+                {"column_name": "user_id"},
+            ],
+            [],  # backfill: no existing blocks to hash
+        ]
+
+        # Should not raise — runs migrations successfully
+        MigrationRunner(adapter).run()
+        adapter.conn.commit.assert_called_once()
+
+    def test_postgres_v010_detection_missing_columns(self):
+        """PostgreSQL: blocks table missing expected columns should raise."""
+        adapter, cursor = self._make_mock_adapter()
+
+        cursor.fetchone.side_effect = [
+            {"exists": False},       # no version table
+            {"exists": True},        # has blocks table
+            None,                    # advisory_unlock
+        ]
+        cursor.fetchall.return_value = [
+            {"column_name": "id"},
+            {"column_name": "foo"},
+        ]
+
+        with pytest.raises(MigrationError, match="missing expected columns"):
+            MigrationRunner(adapter).run()
+
+    def test_postgres_migration_failure_raises(self):
+        """PostgreSQL: a migration that fails should raise MigrationError."""
+        adapter, cursor = self._make_mock_adapter()
+
+        cursor.fetchone.side_effect = [
+            {"exists": True},       # has_version_table
+            {"version": 1},         # current_version
+            None,                   # advisory_unlock
+        ]
+
+        original_up = MIGRATIONS[0].up_postgres
+        MIGRATIONS[0].up_postgres = lambda cur, schema: (_ for _ in ()).throw(
+            RuntimeError("pg error")
+        )
+        try:
+            with pytest.raises(MigrationError, match="failed"):
+                MigrationRunner(adapter).run()
+        finally:
+            MIGRATIONS[0].up_postgres = original_up
+
+    def test_postgres_advisory_lock_released_on_success(self):
+        """PostgreSQL: advisory lock should be released after successful migration."""
+        adapter, cursor = self._make_mock_adapter()
+
+        cursor.fetchone.side_effect = [
+            {"exists": True},       # has_version_table
+            {"version": SCHEMA_VERSION},  # already up to date
+            None,                   # advisory_unlock
+        ]
+
+        MigrationRunner(adapter).run()
+
+        # Verify lock was acquired and released
+        lock_calls = [
+            str(c) for c in cursor.execute.call_args_list
+            if "pg_advisory" in str(c)
+        ]
+        assert len(lock_calls) == 2  # lock + unlock

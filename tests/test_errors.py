@@ -102,6 +102,65 @@ class TestErrorsInFacade:
         mem.close()
 
 
+class TestStorageErrorWrapping:
+    """Test that raw DB exceptions are wrapped in StorageError."""
+
+    def test_create_wraps_storage_failure(self):
+        from unittest.mock import MagicMock
+        from memblock.store import BlockStore
+
+        storage = MagicMock()
+        storage.save_block.side_effect = RuntimeError("disk full")
+        storage.get_block.return_value = None
+        store = BlockStore(storage, author="test")
+        store.op_log = MagicMock()
+        store.op_log.append.return_value = MagicMock(hash="fakehash")
+
+        with pytest.raises(StorageError, match="Failed to save block"):
+            store.create(content="test content", type=BlockType.FACT)
+
+    def test_get_wraps_storage_failure(self):
+        from unittest.mock import MagicMock
+        from memblock.store import BlockStore
+
+        storage = MagicMock()
+        storage.get_block.side_effect = RuntimeError("connection lost")
+        store = BlockStore(storage, author="test")
+
+        with pytest.raises(StorageError, match="Failed to retrieve block"):
+            store.get("blk_123")
+
+    def test_update_wraps_storage_failure(self):
+        from unittest.mock import MagicMock
+        from memblock.store import BlockStore
+        from memblock.block import Block
+
+        storage = MagicMock()
+        block = Block(content="old", type=BlockType.FACT)
+        storage.get_block.return_value = block
+        storage.update_block.side_effect = RuntimeError("write failed")
+        store = BlockStore(storage, author="test")
+        store.op_log = MagicMock()
+        store.op_log.append.return_value = MagicMock(hash="fakehash")
+
+        with pytest.raises(StorageError, match="Failed to update block"):
+            store.update(block.id, content="new")
+
+    def test_hard_delete_wraps_storage_failure(self):
+        from unittest.mock import MagicMock
+        from memblock.store import BlockStore
+        from memblock.block import Block
+
+        storage = MagicMock()
+        block = Block(content="test", type=BlockType.FACT)
+        storage.get_block.return_value = block
+        storage.delete_edges_for_block.side_effect = RuntimeError("DB locked")
+        store = BlockStore(storage, author="test")
+
+        with pytest.raises(StorageError, match="Failed to hard-delete"):
+            store.hard_delete(block.id)
+
+
 class TestErrorsImportable:
     """Test that errors are importable from the top-level package."""
 
