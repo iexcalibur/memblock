@@ -207,6 +207,18 @@ class PostgreSQLAdapter(StorageAdapter):
                 $$
             """)
 
+            # Embeddings table for vector search
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.schema}.memblock_embeddings (
+                    block_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    embedding BYTEA NOT NULL,
+                    PRIMARY KEY (block_id, user_id),
+                    FOREIGN KEY (block_id, user_id)
+                        REFERENCES {self.schema}.memblock_blocks(id, user_id) ON DELETE CASCADE
+                )
+            """)
+
         self.conn.commit()
 
     # ─── Block Operations ─────────────────────────────────────────────────
@@ -547,6 +559,46 @@ class PostgreSQLAdapter(StorageAdapter):
         if row is None:
             return None
         return self._row_to_operation(row)
+
+    # ─── Embedding Operations ────────────────────────────────────────────
+
+    def save_embedding(self, block_id: str, embedding: bytes) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                INSERT INTO {self.schema}.memblock_embeddings (block_id, user_id, embedding)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (block_id, user_id) DO UPDATE SET embedding = EXCLUDED.embedding
+            """, (block_id, self.user_id, embedding))
+        self.conn.commit()
+
+    def get_embedding(self, block_id: str) -> bytes | None:
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT embedding FROM {self.schema}.memblock_embeddings
+                WHERE block_id = %s AND user_id = %s
+            """, (block_id, self.user_id))
+            row = cur.fetchone()
+        return bytes(row["embedding"]) if row else None
+
+    def get_all_embeddings(self) -> list[tuple[str, bytes]]:
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT e.block_id, e.embedding
+                FROM {self.schema}.memblock_embeddings e
+                INNER JOIN {self.schema}.memblock_blocks b
+                    ON e.block_id = b.id AND e.user_id = b.user_id
+                WHERE e.user_id = %s AND b.deleted = FALSE
+            """, (self.user_id,))
+            rows = cur.fetchall()
+        return [(row["block_id"], bytes(row["embedding"])) for row in rows]
+
+    def delete_embedding(self, block_id: str) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                DELETE FROM {self.schema}.memblock_embeddings
+                WHERE block_id = %s AND user_id = %s
+            """, (block_id, self.user_id))
+        self.conn.commit()
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
 

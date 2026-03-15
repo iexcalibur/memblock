@@ -119,6 +119,15 @@ class SQLiteAdapter(StorageAdapter):
             USING fts5(block_id, content, tags, tokenize='porter')
         """)
 
+        # Embeddings table for vector search
+        cur.executescript("""
+            CREATE TABLE IF NOT EXISTS block_embeddings (
+                block_id TEXT PRIMARY KEY,
+                embedding BLOB NOT NULL,
+                FOREIGN KEY (block_id) REFERENCES blocks(id) ON DELETE CASCADE
+            );
+        """)
+
         self.conn.commit()
 
     # ─── Block Operations ─────────────────────────────────────────────────
@@ -426,6 +435,40 @@ class SQLiteAdapter(StorageAdapter):
         if row is None:
             return None
         return self._row_to_operation(row)
+
+    # ─── Embedding Operations ────────────────────────────────────────────
+
+    def save_embedding(self, block_id: str, embedding: bytes) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "INSERT OR REPLACE INTO block_embeddings (block_id, embedding) VALUES (?, ?)",
+            (block_id, embedding),
+        )
+        self.conn.commit()
+
+    def get_embedding(self, block_id: str) -> bytes | None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT embedding FROM block_embeddings WHERE block_id = ?",
+            (block_id,),
+        )
+        row = cur.fetchone()
+        return bytes(row["embedding"]) if row else None
+
+    def get_all_embeddings(self) -> list[tuple[str, bytes]]:
+        cur = self.conn.cursor()
+        cur.execute(
+            """SELECT e.block_id, e.embedding
+               FROM block_embeddings e
+               INNER JOIN blocks b ON e.block_id = b.id
+               WHERE b.deleted = 0"""
+        )
+        return [(row["block_id"], bytes(row["embedding"])) for row in cur.fetchall()]
+
+    def delete_embedding(self, block_id: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM block_embeddings WHERE block_id = ?", (block_id,))
+        self.conn.commit()
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
 

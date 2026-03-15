@@ -107,6 +107,24 @@ class StorageAdapter(ABC):
         """Get the most recent operation (for hash chaining)."""
         ...
 
+    # ─── Embedding Operations ────────────────────────────────────────────
+
+    def save_embedding(self, block_id: str, embedding: bytes) -> None:
+        """Save an embedding vector for a block. Override in subclass."""
+        pass
+
+    def get_embedding(self, block_id: str) -> bytes | None:
+        """Get the embedding for a block. Override in subclass."""
+        return None
+
+    def get_all_embeddings(self) -> list[tuple[str, bytes]]:
+        """Get all (block_id, embedding) pairs. Override in subclass."""
+        return []
+
+    def delete_embedding(self, block_id: str) -> None:
+        """Delete the embedding for a block. Override in subclass."""
+        pass
+
     # ─── Lifecycle ────────────────────────────────────────────────────────
 
     @abstractmethod

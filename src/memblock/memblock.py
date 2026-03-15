@@ -28,16 +28,28 @@ class MemBlock:
     Main entry point for the MemBlock SDK.
 
     Composes: BlockStore + GraphIndex + CryptoLayer + DecayEngine +
-              QueryEngine + ContextBuilder into a single clean API.
+              QueryEngine + ContextBuilder + optional EmbeddingProvider
+              into a single clean API.
 
     Usage:
-        # SQLite (local)
+        # SQLite (local) — keyword search only
         mem = MemBlock(storage="sqlite:///./memory.db")
+
+        # SQLite with local embeddings (hybrid search)
+        mem = MemBlock(storage="sqlite:///./memory.db", embeddings=True)
+
+        # SQLite with OpenAI embeddings
+        mem = MemBlock(
+            storage="sqlite:///./memory.db",
+            embeddings="openai",
+            embeddings_api_key="sk-...",
+        )
 
         # PostgreSQL (production, multi-user)
         mem = MemBlock(
             storage="postgresql://user:pass@localhost:5432/mydb",
             user_id="u_123",
+            embeddings=True,
         )
 
         block = mem.store("User prefers Python", type=BlockType.PREFERENCE)
@@ -53,6 +65,9 @@ class MemBlock:
         encryption_key: str | None = None,
         author: str = "agent",
         user_id: str = "default",
+        embeddings: bool | str = False,
+        embeddings_api_key: str | None = None,
+        embeddings_model: str | None = None,
     ) -> None:
         """
         Initialize MemBlock.
@@ -66,6 +81,13 @@ class MemBlock:
             encryption_key: Passphrase for AES-256 encryption. None = no encryption.
             author: Default author for operations.
             user_id: User ID for multi-tenant PostgreSQL deployments.
+            embeddings: Enable embedding-based semantic search.
+                - False: FTS only (default, no extra deps)
+                - True: Local embeddings via FastEmbed (pip install memblock[embeddings])
+                - "openai": OpenAI text-embedding-3-small (requires embeddings_api_key)
+                - "gemini": Gemini text-embedding-004 (requires embeddings_api_key)
+            embeddings_api_key: API key for OpenAI/Gemini embedding providers.
+            embeddings_model: Override the default embedding model name.
         """
         self._user_id = user_id
 
@@ -73,12 +95,20 @@ class MemBlock:
         self._storage = self._create_storage(storage, user_id)
         self._storage.initialize()
 
+        # Initialize embedding provider (optional)
+        self._embedding_provider = self._create_embedding_provider(
+            embeddings, embeddings_api_key, embeddings_model
+        )
+
         # Compose components
         self._crypto = CryptoLayerWithPassphrase(key=encryption_key)
         self._store = BlockStore(self._storage, author=author)
         self._graph = GraphIndex(self._storage, self._store.op_log)
         self._decay = DecayEngine(self._storage)
-        self._query = QueryEngine(self._storage, self._graph, self._decay)
+        self._query = QueryEngine(
+            self._storage, self._graph, self._decay,
+            embedding_provider=self._embedding_provider,
+        )
         self._context = ContextBuilder(self._storage, self._query, self._graph, self._decay)
 
     @staticmethod
@@ -102,6 +132,52 @@ class MemBlock:
         else:
             # Default to SQLite with the URI as path
             return SQLiteAdapter(uri)
+
+    @staticmethod
+    def _create_embedding_provider(
+        embeddings: bool | str,
+        api_key: str | None,
+        model: str | None,
+    ) -> Any:
+        """Create an embedding provider based on the embeddings parameter."""
+        if embeddings is False:
+            return None
+
+        if embeddings is True:
+            # Local embeddings via FastEmbed
+            try:
+                from memblock.embeddings import FastEmbedProvider
+                return FastEmbedProvider(model=model or "sentence-transformers/all-MiniLM-L6-v2")
+            except ImportError:
+                raise ImportError(
+                    "Local embeddings require fastembed. "
+                    "Install with: pip install memblock[embeddings]"
+                )
+
+        if isinstance(embeddings, str):
+            if embeddings.lower() == "openai":
+                if not api_key:
+                    raise ValueError("embeddings_api_key is required for OpenAI embeddings")
+                from memblock.embeddings import OpenAIEmbeddingProvider
+                return OpenAIEmbeddingProvider(
+                    api_key=api_key,
+                    model=model or "text-embedding-3-small",
+                )
+            elif embeddings.lower() == "gemini":
+                if not api_key:
+                    raise ValueError("embeddings_api_key is required for Gemini embeddings")
+                from memblock.embeddings import GeminiEmbeddingProvider
+                return GeminiEmbeddingProvider(
+                    api_key=api_key,
+                    model=model or "text-embedding-004",
+                )
+            else:
+                raise ValueError(
+                    f"Unknown embeddings provider: {embeddings}. "
+                    "Use True (local), 'openai', or 'gemini'."
+                )
+
+        return None
 
     # ─── Store Operations ─────────────────────────────────────────────────
 
@@ -157,6 +233,11 @@ class MemBlock:
             self._storage.update_block(block.id, {"encrypted": True})
             block.encrypted = True
 
+        # Generate and store embedding (if provider available)
+        # Use original plaintext content for embedding, not encrypted content
+        if self._embedding_provider is not None:
+            self._embed_block(block.id, content)
+
         return block
 
     def get(self, block_id: str, decrypt: bool = True) -> Block | None:
@@ -177,6 +258,7 @@ class MemBlock:
     def update(self, block_id: str, **updates: Any) -> Block | None:
         """Update a block's fields."""
         # If updating content and block is encrypted, encrypt the new content
+        original_content = updates.get("content")
         if "content" in updates:
             block = self._store.get_without_touch(block_id)
             if block and block.encrypted and self._crypto.enabled:
@@ -184,11 +266,21 @@ class MemBlock:
                     updates["content"], block.encryption_level
                 )
 
-        return self._store.update(block_id, **updates)
+        result = self._store.update(block_id, **updates)
+
+        # Re-embed if content changed
+        if original_content is not None and self._embedding_provider is not None:
+            self._embed_block(block_id, original_content)
+
+        return result
 
     def delete(self, block_id: str, cascade: bool = False) -> bool:
         """Soft-delete a block."""
-        return self._store.delete(block_id, cascade=cascade)
+        result = self._store.delete(block_id, cascade=cascade)
+        # Remove embedding on delete
+        if result:
+            self._storage.delete_embedding(block_id)
+        return result
 
     # ─── Graph Operations ─────────────────────────────────────────────────
 
@@ -234,6 +326,7 @@ class MemBlock:
         min_confidence: float = 0.0,
         sort_by: str = "relevance",
         limit: int = 10,
+        semantic: bool = True,
     ) -> list[Block]:
         """
         Query memory blocks with structured filters.
@@ -241,11 +334,12 @@ class MemBlock:
         Args:
             type: Filter by block type
             tags: Filter by tags (match any)
-            text_search: Full-text search
+            text_search: Full-text search (FTS + optional vector hybrid)
             related_to: Block ID — find graph-connected blocks
             min_confidence: Minimum confidence threshold
             sort_by: 'relevance', 'recency', 'access_count', 'strength'
             limit: Maximum results
+            semantic: Enable hybrid search when embeddings are available (default True)
 
         Returns:
             List of matching blocks.
@@ -258,6 +352,7 @@ class MemBlock:
             min_confidence=min_confidence,
             sort_by=sort_by,
             limit=limit,
+            semantic=semantic,
         )
 
     # ─── Context Builder ──────────────────────────────────────────────────
@@ -402,6 +497,25 @@ class MemBlock:
         """Get the weakest memories (candidates for pruning)."""
         return self._decay.get_weakest(limit=limit)
 
+    # ─── Embeddings ──────────────────────────────────────────────────────
+
+    @property
+    def has_embeddings(self) -> bool:
+        """Whether embedding-based semantic search is enabled."""
+        return self._embedding_provider is not None
+
+    def _embed_block(self, block_id: str, content: str) -> None:
+        """Generate and store an embedding for a block."""
+        if self._embedding_provider is None:
+            return
+        try:
+            from memblock.embeddings import pack_embedding
+            vectors = self._embedding_provider.embed([content])
+            if vectors:
+                self._storage.save_embedding(block_id, pack_embedding(vectors[0]))
+        except Exception:
+            pass  # Embedding failure should not break store operations
+
     # ─── Export ───────────────────────────────────────────────────────────
 
     def export_markdown(self) -> str:
@@ -446,12 +560,16 @@ class MemBlock:
         for b in blocks:
             total_edges += len(self._storage.get_edges(b.id, direction="outgoing"))
 
+        embedding_count = len(self._storage.get_all_embeddings())
+
         return {
             "total_blocks": len(blocks),
             "deleted_blocks": len(all_blocks) - len(blocks),
             "blocks_by_type": type_counts,
             "total_edges": total_edges,
             "total_operations": len(self._storage.get_operations()),
+            "embeddings_enabled": self.has_embeddings,
+            "total_embeddings": embedding_count,
         }
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
@@ -468,4 +586,5 @@ class MemBlock:
 
     def __repr__(self) -> str:
         stats = self.stats()
-        return f"MemBlock(blocks={stats['total_blocks']}, edges={stats['total_edges']})"
+        emb = " +embeddings" if self.has_embeddings else ""
+        return f"MemBlock(blocks={stats['total_blocks']}, edges={stats['total_edges']}{emb})"

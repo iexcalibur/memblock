@@ -30,10 +30,14 @@ llm = [
     "openai>=1.0",
     "anthropic>=0.20",
 ]
+embeddings = ["fastembed>=0.3"]
+embeddings-openai = ["httpx>=0.24"]
+embeddings-gemini = ["httpx>=0.24"]
 all = [
     "memblock[postgres]",
     "memblock[tokens]",
     "memblock[llm]",
+    "memblock[embeddings]",
 ]
 dev = [
     "pytest>=7.0",
