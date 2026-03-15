@@ -7,10 +7,10 @@ name = "memblock"
 version = "0.2.0"
 description = "Typed block tree + knowledge graph memory SDK for AI agents"
 readme = "README.md"
-license = "MIT"
+license = "Proprietary"
 requires-python = ">=3.10"
 authors = [
-    {name = "MemBlock Team"},
+    {name = "iexcalibur", email = "shubhamkannojia10@gmail.com"},
 ]
 keywords = ["ai", "memory", "knowledge-graph", "llm", "agent"]
 classifiers = [
