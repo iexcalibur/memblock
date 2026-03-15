@@ -8,6 +8,14 @@ import sys
 from typing import Any
 
 import memblock
+from memblock.errors import LicenseError
+from memblock.licensing import (
+    generate_license,
+    get_secret,
+    get_stored_license,
+    store_license,
+    validate_license,
+)
 
 
 def _open_db(db: str) -> memblock.MemBlock:
@@ -145,6 +153,77 @@ def cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+# ─── License Commands ─────────────────────────────────────────────────────
+
+
+def cmd_activate(args: argparse.Namespace) -> int:
+    """Activate a license key."""
+    key = args.key
+    secret = args.secret or get_secret()
+    if not secret:
+        print("Error: provide --secret or set MEMBLOCK_SECRET env var.", file=sys.stderr)
+        return 1
+
+    try:
+        info = validate_license(key, secret)
+    except LicenseError as e:
+        print(f"Invalid license: {e}", file=sys.stderr)
+        return 1
+
+    store_license(key)
+    expires = info.expires_at.isoformat() if info.expires_at else "perpetual"
+    print(f"License activated for {info.customer} (expires: {expires})")
+    return 0
+
+
+def cmd_license_info(args: argparse.Namespace) -> int:
+    """Show current license details."""
+    key = get_stored_license()
+    if key is None:
+        print("No license found. Run: memblock activate <key>")
+        return 1
+
+    secret = args.secret or get_secret()
+    if not secret:
+        print("Error: provide --secret or set MEMBLOCK_SECRET env var.", file=sys.stderr)
+        return 1
+
+    try:
+        info = validate_license(key, secret)
+    except LicenseError as e:
+        print(f"Stored license is invalid: {e}", file=sys.stderr)
+        return 1
+
+    expires = info.expires_at.isoformat() if info.expires_at else "perpetual"
+    print(f"License ID:  {info.id}")
+    print(f"Customer:    {info.customer}")
+    print(f"Issued:      {info.issued_at.isoformat()}")
+    print(f"Expires:     {expires}")
+    return 0
+
+
+def cmd_license_generate(args: argparse.Namespace) -> int:
+    """Generate a signed license key (author-only)."""
+    secret = args.secret or get_secret()
+    if not secret:
+        print("Error: provide --secret or set MEMBLOCK_SECRET env var.", file=sys.stderr)
+        return 1
+
+    days = args.days if args.days > 0 else None  # 0 = perpetual
+    try:
+        key = generate_license(
+            customer=args.customer,
+            secret=secret,
+            expires_days=days,
+        )
+    except LicenseError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    print(key)
+    return 0
+
+
 # ─── Parser ───────────────────────────────────────────────────────────────
 
 
@@ -199,6 +278,23 @@ def build_parser() -> argparse.ArgumentParser:
     # version
     sub.add_parser("version", help="Print version")
 
+    # activate
+    p_activate = sub.add_parser("activate", help="Activate a license key")
+    p_activate.add_argument("key", help="License key string")
+    p_activate.add_argument("--secret", default=None, help="HMAC secret (or set MEMBLOCK_SECRET)")
+
+    # license (with nested info / generate)
+    p_license = sub.add_parser("license", help="License management")
+    license_sub = p_license.add_subparsers(dest="license_command")
+
+    p_lic_info = license_sub.add_parser("info", help="Show current license details")
+    p_lic_info.add_argument("--secret", default=None, help="HMAC secret (or set MEMBLOCK_SECRET)")
+
+    p_lic_gen = license_sub.add_parser("generate", help="Generate a signed license key")
+    p_lic_gen.add_argument("--customer", required=True, help="Customer name")
+    p_lic_gen.add_argument("--secret", default=None, help="HMAC secret (or set MEMBLOCK_SECRET)")
+    p_lic_gen.add_argument("--days", type=int, default=365, help="Days until expiry (0 = perpetual, default: 365)")
+
     return parser
 
 
@@ -219,7 +315,20 @@ def main(argv: list[str] | None = None) -> int:
         "export": cmd_export,
         "reindex": cmd_reindex,
         "version": cmd_version,
+        "activate": cmd_activate,
     }
+
+    # Handle `memblock license info` / `memblock license generate`
+    if args.command == "license":
+        license_cmds = {
+            "info": cmd_license_info,
+            "generate": cmd_license_generate,
+        }
+        handler = license_cmds.get(getattr(args, "license_command", None))
+        if handler is None:
+            parser.parse_args(["license", "--help"])
+            return 1
+        return handler(args)
 
     handler = commands.get(args.command)
     if handler is None:

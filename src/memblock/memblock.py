@@ -9,7 +9,8 @@ from memblock.context import ContextBuilder
 from memblock.crypto import CryptoLayerWithPassphrase
 from memblock.decay import DecayEngine
 from memblock.dedup import ContentHasher, DuplicateChecker, DuplicatePolicy
-from memblock.errors import DuplicateBlockError, EncryptionError, ExtractionError
+from memblock.errors import DuplicateBlockError, EncryptionError, ExtractionError, LicenseError
+from memblock.licensing import LicenseInfo, get_secret, get_stored_license, validate_license
 from memblock.graph import GraphIndex
 from memblock.ops import OpLog, TamperReport
 from memblock.query import QueryEngine
@@ -78,6 +79,7 @@ class MemBlock:
         extract_model: str | None = None,
         extract_every: int = 100,
         extract_min_confidence: float = 0.3,
+        license_key: str | None = None,
     ) -> None:
         """
         Initialize MemBlock.
@@ -111,6 +113,20 @@ class MemBlock:
             extract_every: Trigger extraction every N messages (default 100).
             extract_min_confidence: Minimum confidence for extracted blocks (default 0.3).
         """
+        # ── License validation (must pass before anything else) ──
+        secret = get_secret()
+        key = license_key or get_stored_license()
+        if key is not None and secret is not None:
+            self._license: LicenseInfo = validate_license(key, secret)
+        elif secret is not None:
+            # Secret is set but no key provided
+            raise LicenseError(
+                "No valid license found. Run: memblock activate <key>"
+            )
+        else:
+            # No secret configured — license enforcement disabled (dev mode)
+            self._license = None  # type: ignore[assignment]
+
         self._user_id = user_id
 
         # Parse storage URI
