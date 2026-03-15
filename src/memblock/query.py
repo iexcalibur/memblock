@@ -42,6 +42,7 @@ class QueryEngine:
         include_decayed: bool = False,
         min_strength: float = 0.0,
         semantic: bool = True,
+        session_id: str | None = None,
     ) -> list[Block]:
         """
         Query memory blocks with multiple filter dimensions.
@@ -71,6 +72,8 @@ class QueryEngine:
             filters["text_search"] = text_search
         if min_confidence > 0:
             filters["min_confidence"] = min_confidence
+        if session_id is not None:
+            filters["session_id"] = session_id
 
         candidates = self.storage.query_blocks(filters)
 

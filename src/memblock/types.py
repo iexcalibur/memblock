@@ -129,6 +129,7 @@ class BlockMetadata:
     last_accessed: datetime | None = None
     decay_rate: float = 0.01  # how fast memory fades (0 = never)
     ttl: int | None = None  # seconds until expiry, None = permanent
+    session_id: str | None = None  # optional session scope
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -140,6 +141,7 @@ class BlockMetadata:
             "last_accessed": self.last_accessed.isoformat() if self.last_accessed else None,
             "decay_rate": self.decay_rate,
             "ttl": self.ttl,
+            "session_id": self.session_id,
         }
 
     @classmethod
@@ -153,6 +155,7 @@ class BlockMetadata:
             last_accessed=datetime.fromisoformat(data["last_accessed"]) if data.get("last_accessed") else None,
             decay_rate=data.get("decay_rate", 0.01),
             ttl=data.get("ttl"),
+            session_id=data.get("session_id"),
         )
 
 

@@ -60,6 +60,7 @@ class StorageAdapter(ABC):
         - min_confidence: float
         - text_search: str (FTS)
         - parent_id: str
+        - session_id: str (filter by session)
         - deleted: bool (default False)
         - limit: int
         - sort_by: str (created_at, access_count, confidence)

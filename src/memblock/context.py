@@ -49,6 +49,7 @@ class ContextBuilder:
         include_metadata: bool = True,
         block_type: BlockType | None = None,
         min_confidence: float = 0.0,
+        session_id: str | None = None,
     ) -> str:
         """
         Build context text for LLM injection.
@@ -66,15 +67,18 @@ class ContextBuilder:
         """
         if strategy == "graph_walk":
             return self._strategy_graph_walk(
-                query, token_budget, include_metadata, block_type, min_confidence
+                query, token_budget, include_metadata, block_type, min_confidence,
+                session_id=session_id,
             )
         elif strategy == "type_grouped":
             return self._strategy_type_grouped(
-                query, token_budget, include_metadata, min_confidence
+                query, token_budget, include_metadata, min_confidence,
+                session_id=session_id,
             )
         else:
             return self._strategy_relevance(
-                query, token_budget, include_metadata, block_type, min_confidence
+                query, token_budget, include_metadata, block_type, min_confidence,
+                session_id=session_id,
             )
 
     def _strategy_relevance(
@@ -84,6 +88,7 @@ class ContextBuilder:
         include_metadata: bool,
         block_type: BlockType | None,
         min_confidence: float,
+        session_id: str | None = None,
     ) -> str:
         """Fill context with most relevant blocks until budget is reached."""
         blocks = self.query.query(
@@ -92,6 +97,7 @@ class ContextBuilder:
             min_confidence=min_confidence,
             sort_by="relevance",
             limit=50,  # get a good pool
+            session_id=session_id,
         )
 
         return self._fill_budget(blocks, token_budget, include_metadata)
@@ -103,6 +109,7 @@ class ContextBuilder:
         include_metadata: bool,
         block_type: BlockType | None,
         min_confidence: float,
+        session_id: str | None = None,
     ) -> str:
         """Start from most relevant block, walk graph outward."""
         # Find the seed block
@@ -112,6 +119,7 @@ class ContextBuilder:
             min_confidence=min_confidence,
             sort_by="relevance",
             limit=1,
+            session_id=session_id,
         )
 
         if not seed_blocks:
@@ -133,6 +141,7 @@ class ContextBuilder:
         token_budget: int,
         include_metadata: bool,
         min_confidence: float,
+        session_id: str | None = None,
     ) -> str:
         """Group blocks by type: facts → preferences → events → entities."""
         type_order = [
@@ -151,6 +160,7 @@ class ContextBuilder:
                 min_confidence=min_confidence,
                 sort_by="strength",
                 limit=20,
+                session_id=session_id,
             )
             all_blocks.extend(blocks)
 

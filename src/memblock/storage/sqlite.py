@@ -80,6 +80,7 @@ class SQLiteAdapter(StorageAdapter):
                 last_accessed TEXT,
                 decay_rate REAL NOT NULL DEFAULT 0.01,
                 ttl INTEGER,
+                session_id TEXT,
                 FOREIGN KEY (block_id) REFERENCES blocks(id) ON DELETE CASCADE
             );
 
@@ -175,8 +176,8 @@ class SQLiteAdapter(StorageAdapter):
         cur.execute(
             """INSERT OR REPLACE INTO block_metadata
                (block_id, confidence, source, created_at, created_by,
-                access_count, last_accessed, decay_rate, ttl)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                access_count, last_accessed, decay_rate, ttl, session_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 block.id,
                 block.metadata.confidence,
@@ -187,6 +188,7 @@ class SQLiteAdapter(StorageAdapter):
                 block.metadata.last_accessed.isoformat() if block.metadata.last_accessed else None,
                 block.metadata.decay_rate,
                 block.metadata.ttl,
+                block.metadata.session_id,
             ),
         )
 
@@ -204,7 +206,7 @@ class SQLiteAdapter(StorageAdapter):
         cur = self.conn.cursor()
         cur.execute(
             """SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
-                      m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl
+                      m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
                FROM blocks b
                LEFT JOIN block_metadata m ON b.id = m.block_id
                WHERE b.id = ?""",
@@ -295,6 +297,10 @@ class SQLiteAdapter(StorageAdapter):
             if tag_conditions:
                 conditions.append(f"({' OR '.join(tag_conditions)})")
 
+        if "session_id" in filters:
+            conditions.append("m.session_id = ?")
+            params.append(filters["session_id"])
+
         if "text_search" in filters:
             use_fts = True
             # Sanitize FTS5 query: remove special characters, wrap terms in quotes
@@ -308,7 +314,7 @@ class SQLiteAdapter(StorageAdapter):
         if use_fts:
             sql = """
                 SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
-                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl
+                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
                 FROM blocks b
                 LEFT JOIN block_metadata m ON b.id = m.block_id
                 INNER JOIN blocks_fts fts ON b.id = fts.block_id
@@ -320,7 +326,7 @@ class SQLiteAdapter(StorageAdapter):
         else:
             sql = """
                 SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
-                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl
+                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
                 FROM blocks b
                 LEFT JOIN block_metadata m ON b.id = m.block_id
             """
@@ -350,7 +356,7 @@ class SQLiteAdapter(StorageAdapter):
         if include_deleted:
             cur.execute(
                 """SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
-                          m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl
+                          m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
                    FROM blocks b
                    LEFT JOIN block_metadata m ON b.id = m.block_id
                    ORDER BY b.created_at DESC"""
@@ -358,7 +364,7 @@ class SQLiteAdapter(StorageAdapter):
         else:
             cur.execute(
                 """SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
-                          m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl
+                          m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
                    FROM blocks b
                    LEFT JOIN block_metadata m ON b.id = m.block_id
                    WHERE b.deleted = 0
@@ -510,6 +516,7 @@ class SQLiteAdapter(StorageAdapter):
                 last_accessed=datetime.fromisoformat(row["last_accessed"]) if row["last_accessed"] else None,
                 decay_rate=row["decay_rate"] if row["decay_rate"] is not None else 0.01,
                 ttl=row["ttl"],
+                session_id=row["session_id"] if "session_id" in row.keys() else None,
             ),
             encryption_level=EncryptionLevel(row["encryption_level"]),
             encrypted=bool(row["encrypted"]),
@@ -527,7 +534,7 @@ class SQLiteAdapter(StorageAdapter):
         cur = self.conn.cursor()
         cur.execute(
             """SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
-                      m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl
+                      m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
                FROM blocks b
                LEFT JOIN block_metadata m ON b.id = m.block_id
                WHERE b.content_hash = ? AND b.deleted = 0

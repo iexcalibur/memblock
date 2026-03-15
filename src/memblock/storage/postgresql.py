@@ -111,6 +111,7 @@ class PostgreSQLAdapter(StorageAdapter):
                     last_accessed TIMESTAMPTZ,
                     decay_rate REAL NOT NULL DEFAULT 0.01,
                     ttl INTEGER,
+                    session_id TEXT,
                     PRIMARY KEY (block_id, user_id),
                     FOREIGN KEY (block_id, user_id)
                         REFERENCES {self.schema}.memblock_blocks(id, user_id) ON DELETE CASCADE
@@ -277,8 +278,8 @@ class PostgreSQLAdapter(StorageAdapter):
             cur.execute(f"""
                 INSERT INTO {self.schema}.memblock_metadata
                     (block_id, user_id, confidence, source, created_at, created_by,
-                     access_count, last_accessed, decay_rate, ttl)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     access_count, last_accessed, decay_rate, ttl, session_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (block_id, user_id) DO UPDATE SET
                     confidence = EXCLUDED.confidence,
                     source = EXCLUDED.source,
@@ -286,7 +287,8 @@ class PostgreSQLAdapter(StorageAdapter):
                     access_count = EXCLUDED.access_count,
                     last_accessed = EXCLUDED.last_accessed,
                     decay_rate = EXCLUDED.decay_rate,
-                    ttl = EXCLUDED.ttl
+                    ttl = EXCLUDED.ttl,
+                    session_id = EXCLUDED.session_id
             """, (
                 block.id,
                 self.user_id,
@@ -298,6 +300,7 @@ class PostgreSQLAdapter(StorageAdapter):
                 block.metadata.last_accessed.isoformat() if block.metadata.last_accessed else None,
                 block.metadata.decay_rate,
                 block.metadata.ttl,
+                block.metadata.session_id,
             ))
 
         self.conn.commit()
@@ -306,7 +309,7 @@ class PostgreSQLAdapter(StorageAdapter):
         with self.conn.cursor() as cur:
             cur.execute(f"""
                 SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
-                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl
+                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
                 FROM {self.schema}.memblock_blocks b
                 LEFT JOIN {self.schema}.memblock_metadata m
                     ON b.id = m.block_id AND b.user_id = m.user_id
@@ -386,6 +389,10 @@ class PostgreSQLAdapter(StorageAdapter):
             conditions.append("m.confidence >= %s")
             params.append(filters["min_confidence"])
 
+        if "session_id" in filters:
+            conditions.append("m.session_id = %s")
+            params.append(filters["session_id"])
+
         if "tags" in filters:
             tag_list = filters["tags"]
             tag_conditions = []
@@ -418,7 +425,7 @@ class PostgreSQLAdapter(StorageAdapter):
 
         sql = f"""
             SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
-                   m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl
+                   m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
             FROM {self.schema}.memblock_blocks b
             LEFT JOIN {self.schema}.memblock_metadata m
                 ON b.id = m.block_id AND b.user_id = m.user_id
@@ -441,7 +448,7 @@ class PostgreSQLAdapter(StorageAdapter):
             if include_deleted:
                 cur.execute(f"""
                     SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
-                           m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl
+                           m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
                     FROM {self.schema}.memblock_blocks b
                     LEFT JOIN {self.schema}.memblock_metadata m
                         ON b.id = m.block_id AND b.user_id = m.user_id
@@ -451,7 +458,7 @@ class PostgreSQLAdapter(StorageAdapter):
             else:
                 cur.execute(f"""
                     SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
-                           m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl
+                           m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
                     FROM {self.schema}.memblock_blocks b
                     LEFT JOIN {self.schema}.memblock_metadata m
                         ON b.id = m.block_id AND b.user_id = m.user_id
@@ -660,6 +667,7 @@ class PostgreSQLAdapter(StorageAdapter):
                 last_accessed=last_accessed,
                 decay_rate=row.get("decay_rate") or 0.01,
                 ttl=row.get("ttl"),
+                session_id=row.get("session_id"),
             ),
             encryption_level=EncryptionLevel(row["encryption_level"]),
             encrypted=bool(row["encrypted"]),
@@ -677,7 +685,7 @@ class PostgreSQLAdapter(StorageAdapter):
         with self.conn.cursor() as cur:
             cur.execute(f"""
                 SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
-                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl
+                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
                 FROM {self.schema}.memblock_blocks b
                 LEFT JOIN {self.schema}.memblock_metadata m
                     ON b.id = m.block_id AND b.user_id = m.user_id

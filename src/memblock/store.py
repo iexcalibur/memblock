@@ -48,6 +48,7 @@ class BlockStore:
         decay_rate: float = 0.01,
         ttl: int | None = None,
         created_by: str | None = None,
+        session_id: str | None = None,
     ) -> Block:
         """
         Create a new memory block.
@@ -65,6 +66,7 @@ class BlockStore:
                 created_by=created_by or self.op_log.author,
                 decay_rate=decay_rate,
                 ttl=ttl,
+                session_id=session_id,
             ),
             encryption_level=encryption_level,
             parent_id=parent_id,

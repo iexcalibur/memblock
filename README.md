@@ -2,7 +2,7 @@
   <h1 align="center">MemBlock</h1>
   <p align="center"><strong>Structured memory SDK for AI agents.</strong></p>
   <p align="center">Give your AI applications persistent, queryable, and intelligent memory — without cloud dependencies.</p>
-  <p align="center"><code>Python 3.10+</code> · <code>319 Tests</code> · <code>Private Distribution</code></p>
+  <p align="center"><code>Python 3.10+</code> · <code>335 Tests</code> · <code>Private Distribution</code></p>
 </p>
 
 ---
@@ -83,7 +83,7 @@ We respect what [Mem0](https://mem0.ai) has built — they're the most adopted m
 | **Cost** | Free tier → $19/mo → $249/mo (graph requires Pro) | **One-time license, no subscriptions** | **MemBlock** — no recurring cost |
 | **Setup complexity** | Moderate (API keys, config, embeddings) | **One line:** `MemBlock(storage="sqlite:///db")` | **MemBlock** — simpler to start |
 | **LLM auto-extraction** | Automatic from conversations | **Built-in (OpenAI, Anthropic)** with configurable triggers | Tie — both handle this well |
-| **Multi-tenancy** | User/session/agent levels | **User-level isolation** (PostgreSQL) | **Mem0** — more granular hierarchy |
+| **Multi-tenancy** | User/session/agent levels | **User + session isolation** (PostgreSQL) | Tie — both support user and session scoping |
 
 ### When to Choose What
 
@@ -167,8 +167,11 @@ Build LLM-ready context strings from relevant memories. Three strategies: **rele
 ### Tamper Detection
 Append-only operation log with SHA-256 hash chain. Every create, update, delete, link, and unlink is recorded. Verify integrity at any time — one method call tells you if anything has been modified outside the SDK.
 
+### Session Scoping
+Optional `session_id` on every block — scope memories to individual conversations, threads, or workflows. Query within a session, list all sessions, or retrieve full session history. Fully backwards compatible — existing code works unchanged. Combined with `user_id` (PostgreSQL), you get user + session isolation for multi-tenant, multi-conversation products.
+
 ### Multi-Storage
-**SQLite** for local development and single-user apps. **PostgreSQL** for production multi-tenant deployments with user-level isolation. Same API — just swap the connection string.
+**SQLite** for local development and single-user apps. **PostgreSQL** for production multi-tenant deployments with user-level and session-level isolation. Same API — just swap the connection string.
 
 ### CLI
 ```
@@ -190,7 +193,7 @@ MemBlock is distributed privately. Access is granted on an invite-only basis.
 ### From GitHub Release (authorized users)
 
 ```bash
-pip install https://github.com/iexcalibur/memblock/releases/download/v0.2.0/memblock-0.2.0-py3-none-any.whl
+pip install https://github.com/iexcalibur/memblock/releases/download/v0.3.0/memblock-0.3.0-py3-none-any.whl
 ```
 
 ### Optional Extras
@@ -219,6 +222,7 @@ pip install "memblock[all]"
 | **Graph** | `link()`, `unlink()`, `neighbors()`, `traverse()` |
 | **Search** | `query()`, `build_context()` |
 | **Extract** | `extract()`, `extract_messages()`, `add_message()`, `flush_extraction()` |
+| **Sessions** | `get_sessions()`, `get_session_history()` |
 | **Manage** | `prune()`, `strongest()`, `weakest()`, `verify()`, `stats()`, `export_markdown()` |
 
 ---
@@ -237,6 +241,7 @@ MemBlock (facade)
 ├── DuplicateChecker — Exact + semantic dedup
 ├── CryptoLayer     — AES-256-GCM field-level encryption
 ├── OpLog           — Append-only hash chain for tamper detection
+├── SessionScoping  — Optional session_id isolation per block
 └── StorageAdapter  — SQLite or PostgreSQL (swappable)
 ```
 

@@ -80,6 +80,7 @@ class MemBlock:
         extract_every: int = 100,
         extract_min_confidence: float = 0.3,
         license_key: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         """
         Initialize MemBlock.
@@ -127,6 +128,7 @@ class MemBlock:
         self._license = None  # type: ignore[assignment]
 
         self._user_id = user_id
+        self._session_id = session_id
 
         # Parse storage URI
         self._storage = self._create_storage(storage, user_id)
@@ -250,6 +252,7 @@ class MemBlock:
         encryption_level: EncryptionLevel = EncryptionLevel.NONE,
         decay_rate: float = 0.01,
         ttl: int | None = None,
+        session_id: str | None = None,
     ) -> Block:
         """
         Store a new memory block.
@@ -314,6 +317,7 @@ class MemBlock:
             encryption_level=encryption_level,
             decay_rate=decay_rate,
             ttl=ttl,
+            session_id=session_id or self._session_id,
         )
 
         if encrypted:
@@ -417,6 +421,7 @@ class MemBlock:
         sort_by: str = "relevance",
         limit: int = 10,
         semantic: bool = True,
+        session_id: str | None = None,
     ) -> list[Block]:
         """
         Query memory blocks with structured filters.
@@ -430,6 +435,7 @@ class MemBlock:
             sort_by: 'relevance', 'recency', 'access_count', 'strength'
             limit: Maximum results
             semantic: Enable hybrid search when embeddings are available (default True)
+            session_id: Filter by session (overrides default session_id)
 
         Returns:
             List of matching blocks.
@@ -443,6 +449,7 @@ class MemBlock:
             sort_by=sort_by,
             limit=limit,
             semantic=semantic,
+            session_id=session_id or self._session_id,
         )
 
     # ─── Context Builder ──────────────────────────────────────────────────
@@ -453,6 +460,7 @@ class MemBlock:
         token_budget: int = 4000,
         strategy: str = "relevance",
         include_metadata: bool = True,
+        session_id: str | None = None,
     ) -> str:
         """
         Build LLM-ready context from relevant memory blocks.
@@ -462,6 +470,7 @@ class MemBlock:
             token_budget: Maximum tokens in output
             strategy: 'relevance', 'graph_walk', or 'type_grouped'
             include_metadata: Include confidence/source in output
+            session_id: Filter by session (overrides default session_id)
 
         Returns:
             Formatted string for LLM context injection.
@@ -471,7 +480,44 @@ class MemBlock:
             token_budget=token_budget,
             strategy=strategy,
             include_metadata=include_metadata,
+            session_id=session_id or self._session_id,
         )
+
+    # ─── Session Operations ────────────────────────────────────────────────
+
+    def get_sessions(self) -> list[str]:
+        """
+        Get all distinct session IDs.
+
+        Returns:
+            List of session_id strings (excludes None).
+        """
+        blocks = self._storage.get_all_blocks()
+        sessions: set[str] = set()
+        for b in blocks:
+            if b.metadata.session_id is not None:
+                sessions.add(b.metadata.session_id)
+        return sorted(sessions)
+
+    def get_session_history(self, session_id: str, limit: int = 100) -> list[Block]:
+        """
+        Get blocks for a specific session, ordered by creation time.
+
+        Args:
+            session_id: The session to retrieve
+            limit: Maximum blocks to return
+
+        Returns:
+            List of blocks in chronological order.
+        """
+        blocks = self._storage.query_blocks({
+            "session_id": session_id,
+            "sort_by": "created_at",
+            "limit": limit,
+        })
+        # Sort chronologically (oldest first)
+        blocks.sort(key=lambda b: b.metadata.created_at.isoformat())
+        return blocks
 
     # ─── Auto-Extraction ─────────────────────────────────────────────────
 

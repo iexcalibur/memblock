@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 # The latest schema version. Bump this when adding new migrations.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass
@@ -86,6 +86,31 @@ MIGRATIONS: list[Migration] = [
         up_postgres=lambda cur, schema: cur.execute(
             f"CREATE INDEX IF NOT EXISTS idx_mb_blocks_content_hash "
             f"ON {schema}.memblock_blocks(content_hash)"
+        ),
+    ),
+    Migration(
+        version=4,
+        description="Add session_id column to block_metadata for session-scoped queries",
+        up_sqlite=lambda cur: (
+            # Check if column exists before adding (idempotent for fresh DBs)
+            cur.execute("PRAGMA table_info(block_metadata)"),
+            (
+                None
+                if "session_id" in {row[1] for row in cur.fetchall()}
+                else cur.execute("ALTER TABLE block_metadata ADD COLUMN session_id TEXT")
+            ),
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_metadata_session_id ON block_metadata(session_id)"
+            ),
+        ),
+        up_postgres=lambda cur, schema: (
+            cur.execute(
+                f"ALTER TABLE {schema}.memblock_metadata ADD COLUMN IF NOT EXISTS session_id TEXT"
+            ),
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_mb_metadata_session "
+                f"ON {schema}.memblock_metadata(user_id, session_id)"
+            ),
         ),
     ),
 ]
