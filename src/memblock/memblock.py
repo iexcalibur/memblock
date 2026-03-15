@@ -113,19 +113,18 @@ class MemBlock:
             extract_every: Trigger extraction every N messages (default 100).
             extract_min_confidence: Minimum confidence for extracted blocks (default 0.3).
         """
-        # ── License validation (must pass before anything else) ──
-        secret = get_secret()
-        key = license_key or get_stored_license()
-        if key is not None and secret is not None:
-            self._license: LicenseInfo = validate_license(key, secret)
-        elif secret is not None:
-            # Secret is set but no key provided
-            raise LicenseError(
-                "No valid license found. Run: memblock activate <key>"
-            )
-        else:
-            # No secret configured — license enforcement disabled (dev mode)
-            self._license = None  # type: ignore[assignment]
+        # ── License validation (disabled — re-enable for paid tier) ──
+        # secret = get_secret()
+        # key = license_key or get_stored_license()
+        # if key is not None and secret is not None:
+        #     self._license: LicenseInfo = validate_license(key, secret)
+        # elif secret is not None:
+        #     raise LicenseError(
+        #         "No valid license found. Run: memblock activate <key>"
+        #     )
+        # else:
+        #     self._license = None
+        self._license = None  # type: ignore[assignment]
 
         self._user_id = user_id
 

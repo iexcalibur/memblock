@@ -175,10 +175,13 @@ class TestGetSecret:
 
 
 class TestMemBlockLicenseCheck:
-    def test_no_secret_skips_validation(self):
-        """When MEMBLOCK_SECRET is not set, license enforcement is disabled."""
+    """License enforcement is currently disabled (no paid tier yet).
+    These tests verify the constructor works without license validation.
+    Re-enable enforcement tests when paid tier is activated."""
+
+    def test_constructor_works_without_secret(self):
+        """Constructor works when no MEMBLOCK_SECRET is set."""
         with patch.dict(os.environ, {}, clear=True):
-            # Remove MEMBLOCK_SECRET if it exists
             os.environ.pop("MEMBLOCK_SECRET", None)
             from memblock import MemBlock
 
@@ -186,44 +189,23 @@ class TestMemBlockLicenseCheck:
             assert mem._license is None
             mem.close()
 
-    def test_secret_set_no_key_raises(self):
-        """When secret is set but no license key exists, raises LicenseError."""
+    def test_constructor_works_with_secret_no_key(self):
+        """Constructor works even when MEMBLOCK_SECRET is set but no key exists (enforcement disabled)."""
         with patch.dict(os.environ, {"MEMBLOCK_SECRET": TEST_SECRET}), \
              patch("memblock.memblock.get_stored_license", return_value=None):
-            from memblock import MemBlock
-
-            with pytest.raises(LicenseError, match="No valid license"):
-                MemBlock(storage="sqlite:///:memory:")
-
-    def test_valid_key_via_param(self):
-        """License key passed directly to constructor."""
-        key = generate_license("Test Corp", TEST_SECRET)
-        with patch.dict(os.environ, {"MEMBLOCK_SECRET": TEST_SECRET}):
-            from memblock import MemBlock
-
-            mem = MemBlock(storage="sqlite:///:memory:", license_key=key)
-            assert mem._license.customer == "Test Corp"
-            mem.close()
-
-    def test_valid_key_via_stored_file(self):
-        """License key loaded from ~/.memblock/license."""
-        key = generate_license("Test Corp", TEST_SECRET)
-        with patch.dict(os.environ, {"MEMBLOCK_SECRET": TEST_SECRET}), \
-             patch("memblock.memblock.get_stored_license", return_value=key):
             from memblock import MemBlock
 
             mem = MemBlock(storage="sqlite:///:memory:")
-            assert mem._license.customer == "Test Corp"
+            assert mem._license is None
             mem.close()
 
-    def test_invalid_key_raises(self):
-        """Tampered key raises LicenseError even when secret is set."""
-        with patch.dict(os.environ, {"MEMBLOCK_SECRET": TEST_SECRET}), \
-             patch("memblock.memblock.get_stored_license", return_value=None):
-            from memblock import MemBlock
+    def test_constructor_works_with_any_key(self):
+        """Constructor ignores license_key param (enforcement disabled)."""
+        from memblock import MemBlock
 
-            with pytest.raises(LicenseError):
-                MemBlock(storage="sqlite:///:memory:", license_key="bad-key")
+        mem = MemBlock(storage="sqlite:///:memory:", license_key="anything")
+        assert mem._license is None
+        mem.close()
 
 
 # ─── CLI Commands ─────────────────────────────────────────────────────────
