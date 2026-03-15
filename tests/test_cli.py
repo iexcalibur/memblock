@@ -54,7 +54,7 @@ class TestVersion:
         assert rc == 0
         out = capsys.readouterr().out
         assert "memblock" in out
-        assert "0.2.0" in out
+        assert "0.3.0" in out
 
 
 class TestQuery:

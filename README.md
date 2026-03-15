@@ -167,8 +167,23 @@ Build LLM-ready context strings from relevant memories. Three strategies: **rele
 ### Tamper Detection
 Append-only operation log with SHA-256 hash chain. Every create, update, delete, link, and unlink is recorded. Verify integrity at any time — one method call tells you if anything has been modified outside the SDK.
 
-### Session Scoping
-Optional `session_id` on every block — scope memories to individual conversations, threads, or workflows. Query within a session, list all sessions, or retrieve full session history. Fully backwards compatible — existing code works unchanged. Combined with `user_id` (PostgreSQL), you get user + session isolation for multi-tenant, multi-conversation products.
+### Session Scoping (Opt-in)
+Multi-session support is **off by default** — all memories live in a single global scope, which is all most agents need. When you're ready for multi-conversation products, just start passing `session_id` to any method. No config changes, no migrations, no feature flags — it just works.
+
+```python
+# Single-session (default) — no session_id needed
+mem.store("User likes Python", type=BlockType.PREFERENCE)
+mem.query(type=BlockType.PREFERENCE)  # returns all blocks
+
+# Multi-session (opt-in) — pass session_id when you need it
+mem.store("msg in chat 1", type=BlockType.EVENT, session_id="chat_001")
+mem.store("msg in chat 2", type=BlockType.EVENT, session_id="chat_002")
+mem.query(session_id="chat_001")  # only chat_001 blocks
+mem.get_sessions()                # ["chat_001", "chat_002"]
+mem.get_session_history("chat_001")  # chronological blocks
+```
+
+The developer decides. Combined with `user_id` (PostgreSQL), you get user + session isolation for multi-tenant, multi-conversation products.
 
 ### Multi-Storage
 **SQLite** for local development and single-user apps. **PostgreSQL** for production multi-tenant deployments with user-level and session-level isolation. Same API — just swap the connection string.

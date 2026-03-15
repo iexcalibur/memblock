@@ -113,6 +113,9 @@ class MemBlock:
             extract_model: Model name override for extraction.
             extract_every: Trigger extraction every N messages (default 100).
             extract_min_confidence: Minimum confidence for extracted blocks (default 0.3).
+            session_id: Default session ID for all operations. None = single-session mode
+                (all blocks in one global scope). Set this or pass session_id per-call
+                to opt into multi-session scoping.
         """
         # ── License validation (disabled — re-enable for paid tier) ──
         # secret = get_secret()
