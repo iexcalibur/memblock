@@ -59,20 +59,61 @@ That's it. Five lines to go from "my agent forgets everything" to "my agent has 
 
 ---
 
-## Why MemBlock Over Alternatives?
+## MemBlock vs Mem0 vs Traditional Memory — An Honest Comparison
 
-| Capability | Raw Vector DB | Cloud Memory API | JSON / Files | **MemBlock** |
-|---|---|---|---|---|
-| **Typed memories** | No — everything is an embedding | Varies | Manual schemas | **5 built-in types** (Fact, Preference, Event, Entity, Relation) |
-| **Knowledge graph** | No | Rarely | No | **8 relationship types** with traversal |
-| **Memory decay** | No — everything persists equally | No | No | **Exponential decay + access reinforcement** |
-| **Deduplication** | Manual | Varies | Manual | **Exact hash + semantic similarity** |
-| **Encryption** | Depends on provider | Provider-controlled | No | **AES-256-GCM, field-level, your keys** |
-| **Hybrid search** | Vector only | Varies | None / basic | **Full-text + vector + RRF fusion** |
-| **Data ownership** | Self-hosted possible | Vendor servers | Local | **100% your infrastructure** |
-| **Tamper detection** | No | No | No | **SHA-256 hash chain on all operations** |
-| **LLM auto-extraction** | No | Sometimes | No | **Built-in (OpenAI, Anthropic)** |
-| **Setup complexity** | High (infra + embeddings) | Low (but vendor-locked) | Low (but fragile) | **One line: `MemBlock(storage="sqlite:///db")`** |
+We respect what [Mem0](https://mem0.ai) has built — they're the most adopted memory layer in the ecosystem with 41k+ GitHub stars and proven benchmarks. This comparison is honest: we call out where Mem0 wins, where MemBlock wins, and where traditional approaches still make sense.
+
+### Head-to-Head: MemBlock vs Mem0
+
+| Capability | **Mem0** | **MemBlock** | Verdict |
+|---|---|---|---|
+| **Typed memory structure** | Unstructured — memories are text blobs with metadata | **5 built-in types** (Fact, Preference, Event, Entity, Relation) | **MemBlock** — structure matters for reasoning |
+| **Knowledge graph** | Available on Pro tier ($249/mo) | **Built-in, no paywall** — 8 relationship types with traversal | **MemBlock** — graph shouldn't be a premium feature |
+| **Memory decay** | TTL-based expiration | **Exponential decay + access reinforcement** — mimics how human memory works | **MemBlock** — smarter forgetting |
+| **Deduplication** | Basic duplicate detection | **Exact hash + semantic similarity** with 4 configurable policies (error, skip, return, merge) | **MemBlock** — more control |
+| **Encryption** | Platform-managed (cloud) | **AES-256-GCM, field-level, your keys, your control** | **MemBlock** — zero-trust encryption |
+| **Tamper detection** | Audit logs (enterprise) | **SHA-256 hash chain on every operation** — cryptographic proof | **MemBlock** — verifiable integrity |
+| **Search** | Vector + graph (Pro) | **FTS + vector + RRF fusion** | Tie — different approaches, both effective |
+| **Ecosystem & integrations** | Python, JS, LangGraph, CrewAI, Vercel AI SDK, MCP server | Python only | **Mem0** — much broader ecosystem |
+| **Community & adoption** | 41k+ GitHub stars, 186M+ API calls | New, private distribution | **Mem0** — battle-tested at scale |
+| **Managed cloud option** | Yes — zero-infra hosted service | No — self-hosted only | **Mem0** — if you don't want to manage infrastructure |
+| **Token compression** | Up to 80% prompt token reduction (claimed) | Context builder with token budgets | **Mem0** — more mature optimization |
+| **Framework integrations** | OpenAI, LangChain, CrewAI, Vercel AI SDK | Standalone Python SDK | **Mem0** — plug into any stack |
+| **Data ownership** | Cloud: vendor-hosted. Self-hosted: you own it | **100% your infrastructure, always** | **MemBlock** — no cloud option means no data risk |
+| **Cost** | Free tier → $19/mo → $249/mo (graph requires Pro) | **One-time license, no subscriptions** | **MemBlock** — no recurring cost |
+| **Setup complexity** | Moderate (API keys, config, embeddings) | **One line:** `MemBlock(storage="sqlite:///db")` | **MemBlock** — simpler to start |
+| **LLM auto-extraction** | Automatic from conversations | **Built-in (OpenAI, Anthropic)** with configurable triggers | Tie — both handle this well |
+| **Multi-tenancy** | User/session/agent levels | **User-level isolation** (PostgreSQL) | **Mem0** — more granular hierarchy |
+
+### When to Choose What
+
+**Choose Mem0 if:**
+- You need a managed cloud service and don't want to host anything
+- You're building in JavaScript/TypeScript (MemBlock is Python only)
+- You need integrations with LangGraph, CrewAI, or Vercel AI SDK out of the box
+- You need enterprise compliance (SOC 2) and don't want to handle it yourself
+- Your team values community size and ecosystem maturity over raw feature set
+
+**Choose MemBlock if:**
+- You need full data ownership with zero cloud dependencies
+- You want typed memory structure, knowledge graph, and decay without paying $249/month
+- You need field-level encryption with your own keys
+- You need cryptographic tamper detection (hash chain verification)
+- You want a simple, deterministic SDK you can test and debug like any other library
+- You're cost-sensitive — one license, no recurring subscription
+
+**Choose traditional approaches (vector DB, JSON files) if:**
+- You only need similarity search and nothing else (use a vector DB directly)
+- Your project is a quick prototype that doesn't need persistence (just use a dict)
+- You're comfortable building and maintaining custom memory infrastructure
+
+### The Honest Bottom Line
+
+Mem0 is the **market leader** — bigger community, more integrations, managed cloud, proven at scale. If you want the safe, well-supported choice with zero infrastructure work, Mem0 is excellent.
+
+MemBlock is for developers who want **more structure, more control, and more ownership**. Typed memories, built-in graph (no paywall), cryptographic integrity, field-level encryption, and intelligent decay — all running on your own database with no subscriptions. It's a different philosophy: you own everything, you control everything.
+
+We're not trying to replace Mem0. We're building for developers who need what Mem0 doesn't offer.
 
 ---
 
