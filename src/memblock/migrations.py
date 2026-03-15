@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 # The latest schema version. Bump this when adding new migrations.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 @dataclass
@@ -110,6 +110,54 @@ MIGRATIONS: list[Migration] = [
             cur.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_mb_metadata_session "
                 f"ON {schema}.memblock_metadata(user_id, session_id)"
+            ),
+        ),
+    ),
+    Migration(
+        version=5,
+        description="Add hierarchical scoping (org_id, project_id, agent_id) and custom_metadata",
+        up_sqlite=lambda cur: (
+            # Check existing columns to avoid duplicate ADD COLUMN errors
+            cur.execute("PRAGMA table_info(block_metadata)"),
+            [
+                cur.execute(f"ALTER TABLE block_metadata ADD COLUMN {col} TEXT")
+                for col in ("org_id", "project_id", "agent_id", "custom_metadata")
+                if col not in {row[1] for row in cur.execute("PRAGMA table_info(block_metadata)").fetchall()}
+            ],
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_metadata_org_id ON block_metadata(org_id)"
+            ),
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_metadata_project_id ON block_metadata(project_id)"
+            ),
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_metadata_agent_id ON block_metadata(agent_id)"
+            ),
+        ),
+        up_postgres=lambda cur, schema: (
+            cur.execute(
+                f"ALTER TABLE {schema}.memblock_metadata ADD COLUMN IF NOT EXISTS org_id TEXT"
+            ),
+            cur.execute(
+                f"ALTER TABLE {schema}.memblock_metadata ADD COLUMN IF NOT EXISTS project_id TEXT"
+            ),
+            cur.execute(
+                f"ALTER TABLE {schema}.memblock_metadata ADD COLUMN IF NOT EXISTS agent_id TEXT"
+            ),
+            cur.execute(
+                f"ALTER TABLE {schema}.memblock_metadata ADD COLUMN IF NOT EXISTS custom_metadata JSONB"
+            ),
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_mb_metadata_org "
+                f"ON {schema}.memblock_metadata(user_id, org_id)"
+            ),
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_mb_metadata_project "
+                f"ON {schema}.memblock_metadata(user_id, project_id)"
+            ),
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_mb_metadata_agent "
+                f"ON {schema}.memblock_metadata(user_id, agent_id)"
             ),
         ),
     ),

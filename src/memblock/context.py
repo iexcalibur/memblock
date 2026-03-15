@@ -7,6 +7,8 @@ from memblock.decay import DecayEngine
 from memblock.graph import GraphIndex
 from memblock.query import QueryEngine
 from memblock.storage.base import StorageAdapter
+from typing import Any
+
 from memblock.types import BlockType
 
 
@@ -50,6 +52,10 @@ class ContextBuilder:
         block_type: BlockType | None = None,
         min_confidence: float = 0.0,
         session_id: str | None = None,
+        org_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+        metadata_filters: dict[str, Any] | None = None,
     ) -> str:
         """
         Build context text for LLM injection.
@@ -65,20 +71,25 @@ class ContextBuilder:
         Returns:
             Formatted string ready for LLM context injection.
         """
+        scope_kwargs = dict(
+            session_id=session_id, org_id=org_id,
+            project_id=project_id, agent_id=agent_id,
+            metadata_filters=metadata_filters,
+        )
         if strategy == "graph_walk":
             return self._strategy_graph_walk(
                 query, token_budget, include_metadata, block_type, min_confidence,
-                session_id=session_id,
+                **scope_kwargs,
             )
         elif strategy == "type_grouped":
             return self._strategy_type_grouped(
                 query, token_budget, include_metadata, min_confidence,
-                session_id=session_id,
+                **scope_kwargs,
             )
         else:
             return self._strategy_relevance(
                 query, token_budget, include_metadata, block_type, min_confidence,
-                session_id=session_id,
+                **scope_kwargs,
             )
 
     def _strategy_relevance(
@@ -89,6 +100,10 @@ class ContextBuilder:
         block_type: BlockType | None,
         min_confidence: float,
         session_id: str | None = None,
+        org_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+        metadata_filters: dict[str, Any] | None = None,
     ) -> str:
         """Fill context with most relevant blocks until budget is reached."""
         blocks = self.query.query(
@@ -96,8 +111,12 @@ class ContextBuilder:
             type=block_type,
             min_confidence=min_confidence,
             sort_by="relevance",
-            limit=50,  # get a good pool
+            limit=50,
             session_id=session_id,
+            org_id=org_id,
+            project_id=project_id,
+            agent_id=agent_id,
+            metadata_filters=metadata_filters,
         )
 
         return self._fill_budget(blocks, token_budget, include_metadata)
@@ -110,9 +129,12 @@ class ContextBuilder:
         block_type: BlockType | None,
         min_confidence: float,
         session_id: str | None = None,
+        org_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+        metadata_filters: dict[str, Any] | None = None,
     ) -> str:
         """Start from most relevant block, walk graph outward."""
-        # Find the seed block
         seed_blocks = self.query.query(
             text_search=query,
             type=block_type,
@@ -120,6 +142,10 @@ class ContextBuilder:
             sort_by="relevance",
             limit=1,
             session_id=session_id,
+            org_id=org_id,
+            project_id=project_id,
+            agent_id=agent_id,
+            metadata_filters=metadata_filters,
         )
 
         if not seed_blocks:
@@ -142,6 +168,10 @@ class ContextBuilder:
         include_metadata: bool,
         min_confidence: float,
         session_id: str | None = None,
+        org_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+        metadata_filters: dict[str, Any] | None = None,
     ) -> str:
         """Group blocks by type: facts → preferences → events → entities."""
         type_order = [
@@ -161,6 +191,10 @@ class ContextBuilder:
                 sort_by="strength",
                 limit=20,
                 session_id=session_id,
+                org_id=org_id,
+                project_id=project_id,
+                agent_id=agent_id,
+                metadata_filters=metadata_filters,
             )
             all_blocks.extend(blocks)
 

@@ -6,6 +6,8 @@ from memblock.block import Block
 from memblock.decay import DecayEngine
 from memblock.graph import GraphIndex
 from memblock.storage.base import StorageAdapter
+from typing import Any
+
 from memblock.types import BlockType
 
 
@@ -24,11 +26,13 @@ class QueryEngine:
         graph: GraphIndex,
         decay: DecayEngine,
         embedding_provider: object | None = None,
+        reranker: object | None = None,
     ) -> None:
         self.storage = storage
         self.graph = graph
         self.decay = decay
         self._embedding_provider = embedding_provider
+        self._reranker = reranker
 
     def query(
         self,
@@ -43,6 +47,10 @@ class QueryEngine:
         min_strength: float = 0.0,
         semantic: bool = True,
         session_id: str | None = None,
+        org_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+        metadata_filters: dict[str, Any] | None = None,
     ) -> list[Block]:
         """
         Query memory blocks with multiple filter dimensions.
@@ -74,6 +82,14 @@ class QueryEngine:
             filters["min_confidence"] = min_confidence
         if session_id is not None:
             filters["session_id"] = session_id
+        if org_id is not None:
+            filters["org_id"] = org_id
+        if project_id is not None:
+            filters["project_id"] = project_id
+        if agent_id is not None:
+            filters["agent_id"] = agent_id
+        if metadata_filters:
+            filters["metadata_filters"] = metadata_filters
 
         candidates = self.storage.query_blocks(filters)
 
@@ -143,8 +159,19 @@ class QueryEngine:
                 return base + boost
             scored.sort(key=relevance_score, reverse=True)
 
-        # Step 5: Apply limit and return blocks
-        return [block for block, _ in scored[:limit]]
+        # Step 5: Apply limit
+        results = [block for block, _ in scored[:limit]]
+
+        # Step 6: Rerank if reranker is configured and text_search is provided
+        if text_search and self._reranker is not None:
+            try:
+                from memblock.rerankers import Reranker
+                if isinstance(self._reranker, Reranker):
+                    results = self._reranker.rerank(text_search, results, limit)
+            except Exception:
+                pass  # reranker failure should not break queries
+
+        return results
 
     def _hybrid_search(
         self,

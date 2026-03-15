@@ -2,7 +2,7 @@
   <h1 align="center">MemBlock</h1>
   <p align="center"><strong>Structured memory SDK for AI agents.</strong></p>
   <p align="center">Give your AI applications persistent, queryable, and intelligent memory — without cloud dependencies.</p>
-  <p align="center"><code>Python 3.10+</code> · <code>335 Tests</code> · <code>Private Distribution</code></p>
+  <p align="center"><code>Python 3.10+</code> · <code>335 Tests</code> · <code>v0.4.0</code> · <code>Private Distribution</code></p>
 </p>
 
 ---
@@ -74,7 +74,7 @@ Mem0 is the dominant memory layer in the AI ecosystem — ~50k GitHub stars, $24
 | **Encryption** | SOC 2, HIPAA compliant. BYOK on enterprise. Platform-managed | **AES-256-GCM, field-level, your keys, always** — STANDARD (content) or SENSITIVE (content + tags) | **MemBlock** — zero-trust encryption without enterprise tier |
 | **Tamper detection** | Audit trails, versioned + timestamped memories. Exportable | **SHA-256 hash chain on every operation** — cryptographic proof of integrity, verifiable in one call | **MemBlock** — cryptographic vs log-based verification |
 | **Search** | Semantic retrieval via embeddings. 22+ vector store backends. Filtering + batch ops | **FTS5 + vector + RRF fusion** — hybrid search combining keyword and semantic | Tie — different strengths. Mem0 has more backend options; MemBlock has hybrid fusion |
-| **Session support** | Three levels: `user_id`, `agent_id`, `run_id` — built-in hierarchy | **Opt-in `session_id`** — single-session by default, multi-session when you need it | **Mem0** — more granular hierarchy with agent-level scoping |
+| **Session support** | Three levels: `user_id`, `agent_id`, `run_id` — built-in hierarchy | **5-level hierarchy**: `org_id` → `project_id` → `user_id` → `agent_id` → `session_id` — all opt-in | **MemBlock** — deeper hierarchy with org/project scoping |
 | **Multi-tenancy** | Automatic graph isolation per user. Query time constant as users scale | **User + session isolation** (PostgreSQL). Composite indexes for fast scoped queries | Tie — both isolate by user. Mem0 scales graph isolation; MemBlock scales relational queries |
 | **Ecosystem** | Python, JS/TS, REST API. LangChain, LangGraph, CrewAI, AutoGen, Vercel AI SDK, MCP server, Chrome extension. AWS Agent SDK partner | Python only. Standalone SDK | **Mem0** — significantly broader. Not close |
 | **Community** | ~50k GitHub stars. $24M Series A. 18M+ PyPI downloads | New, private distribution | **Mem0** — massive community and proven at scale |
@@ -85,6 +85,12 @@ Mem0 is the dominant memory layer in the AI ecosystem — ~50k GitHub stars, $24
 | **Cost** | Free (10K) → $19/mo (50K) → $249/mo (unlimited + graph) → Enterprise | **One-time license, no subscriptions** | **MemBlock** — no recurring cost. Graph included free |
 | **Setup** | Cloud: API key + 3 lines. Self-hosted: Docker Compose + config | **One line:** `MemBlock(storage="sqlite:///db")` | **MemBlock** — simpler to start. Mem0 cloud is also easy though |
 | **LLM extraction** | Automatic from conversations. Supports 15+ LLM providers | **Built-in (OpenAI, Anthropic)** with configurable triggers and buffer-based extraction | Tie — both handle this. Mem0 supports more providers |
+| **Async API** | Async-by-default since v1.0 | **AsyncMemBlock** — full async wrapper with `asyncio.to_thread()` | Tie — both support async |
+| **Reranking** | Cohere, HuggingFace, BM25 rerankers | **BM25 (zero deps), Cohere, CrossEncoder** — pluggable reranker interface | Tie — similar offerings |
+| **Conflict resolution** | LLM-powered ADD/UPDATE/DELETE decisions on every `add()` | **Opt-in LLM conflict resolution** — same ADD/UPDATE/DELETE/NONE decisions, configurable | Tie — both offer this. Mem0's is on by default |
+| **Event hooks** | Not available | **on_add, on_update, on_delete, on_query** — sync + async callbacks | **MemBlock** — Mem0 doesn't have this |
+| **Metadata filtering** | Arbitrary key-value filters on search | **Custom metadata JSON** with arbitrary key-value filtering on SQLite + PostgreSQL | Tie — both support this |
+| **Auto-extraction on store** | Automatic on every `add()` by default | **Opt-in `auto_extract_on_store`** — extracted blocks linked via DERIVED_FROM | Tie — both offer this. Different defaults |
 | **Offline / air-gapped** | Self-hosted with Ollama — fully offline possible | **SQLite + local FastEmbed** — fully offline, no Docker | **MemBlock** — simpler offline story |
 
 ### What Mem0 Does Better
@@ -105,6 +111,8 @@ Let's be direct about where Mem0 wins outright:
 - **Field-level encryption** — AES-256-GCM with your keys, no enterprise tier required. Encrypt content only or content + tags.
 - **Cryptographic integrity** — SHA-256 hash chain on every operation. One call to verify nothing was tampered with.
 - **Setup simplicity** — `pip install` + one line of Python. No Docker, no Neo4j, no API keys needed for basic use.
+- **Event hooks** — Register callbacks on memory lifecycle events (add, update, delete, query). Mem0 doesn't offer this.
+- **Hierarchical scoping** — 5-level opt-in hierarchy (org → project → user → agent → session) vs Mem0's 3 levels.
 - **Cost** — One license, no subscriptions. Graph, encryption, decay, sessions — all included.
 
 ### Who should choose MemBlock vs Mem0
@@ -219,6 +227,79 @@ mem.get_session_history("chat_001")  # chronological blocks
 
 The developer decides. Combined with `user_id` (PostgreSQL), you get user + session isolation for multi-tenant, multi-conversation products.
 
+### Async API
+Full async support via `AsyncMemBlock`. Every method is wrapped with `asyncio.to_thread()` so it won't block your event loop. Works with FastAPI, aiohttp, and any async framework.
+
+```python
+from memblock import AsyncMemBlock, BlockType
+
+async with AsyncMemBlock(storage="sqlite:///./memory.db") as mem:
+    block = await mem.store("User prefers Python", type=BlockType.PREFERENCE)
+    results = await mem.query(text_search="Python")
+    context = await mem.build_context(query="preferences", token_budget=4000)
+```
+
+### Reranker Support
+Improve search quality with pluggable rerankers. BM25 (zero dependencies), Cohere (API), or CrossEncoder (local HuggingFace model). Reranking happens automatically after the initial search.
+
+```python
+from memblock.rerankers import BM25Reranker, CohereReranker
+
+# BM25 — zero dependencies, works offline
+mem = MemBlock(storage="sqlite:///./db", reranker=BM25Reranker())
+
+# Cohere — best quality
+mem = MemBlock(storage="sqlite:///./db", reranker=CohereReranker(api_key="co-..."))
+```
+
+### Conflict Resolution via LLM
+When enabled, `store()` finds semantically similar existing memories and asks the LLM to decide: **ADD** (new), **UPDATE** (refine existing), **DELETE** (contradicted), or **NONE** (already known). Same concept as Mem0's inference mode.
+
+```python
+mem = MemBlock(
+    storage="sqlite:///./db",
+    embeddings=True,
+    extract_provider="openai",
+    extract_api_key="sk-...",
+    conflict_resolution=True,  # enable LLM conflict resolution
+)
+```
+
+### Hierarchical Scoping
+5-level opt-in hierarchy: `org_id` → `project_id` → `user_id` → `agent_id` → `session_id`. Set defaults in the constructor, override per-call. Fully backward compatible — existing code works unchanged.
+
+```python
+mem = MemBlock(
+    storage="postgresql://...",
+    org_id="acme_corp",
+    project_id="chatbot_v2",
+    user_id="u_123",
+    agent_id="support_bot",
+)
+mem.store("User prefers email", type=BlockType.PREFERENCE, session_id="chat_001")
+mem.query(org_id="acme_corp", project_id="chatbot_v2")  # scoped query
+```
+
+### Custom Metadata Filtering
+Attach arbitrary key-value metadata to any block and filter on it during search.
+
+```python
+mem.store("User has Pro plan", type=BlockType.FACT, metadata={"plan": "pro", "region": "us-east"})
+results = mem.query(metadata_filters={"plan": "pro"})
+```
+
+### Event Hooks
+Register callbacks for memory lifecycle events. Sync or async. Errors in hooks never break the main operation.
+
+```python
+def on_memory_added(data):
+    print(f"New memory: {data['block_id']}")
+
+mem = MemBlock(storage="sqlite:///./db")
+mem.on("on_add", on_memory_added)
+mem.on("on_delete", lambda data: log.warning(f"Deleted: {data['block_id']}"))
+```
+
 ### Multi-Storage
 **SQLite** for local development and single-user apps. **PostgreSQL** for production multi-tenant deployments with user-level and session-level isolation. Same API — just swap the connection string.
 
@@ -242,7 +323,7 @@ MemBlock is distributed privately. Access is granted on an invite-only basis.
 ### From GitHub Release (authorized users)
 
 ```bash
-pip install https://github.com/iexcalibur/memblock/releases/download/v0.3.0/memblock-0.3.0-py3-none-any.whl
+pip install https://github.com/iexcalibur/memblock/releases/download/v0.4.0/memblock-0.4.0-py3-none-any.whl
 ```
 
 ### Optional Extras
@@ -256,6 +337,12 @@ pip install "memblock[embeddings]"
 
 # LLM extraction (OpenAI + Anthropic)
 pip install "memblock[llm]"
+
+# Cohere reranker
+pip install "memblock[reranker-cohere]"
+
+# Cross-encoder reranker (HuggingFace)
+pip install "memblock[reranker-cross-encoder]"
 
 # Everything
 pip install "memblock[all]"
@@ -272,6 +359,8 @@ pip install "memblock[all]"
 | **Search** | `query()`, `build_context()` |
 | **Extract** | `extract()`, `extract_messages()`, `add_message()`, `flush_extraction()` |
 | **Sessions** | `get_sessions()`, `get_session_history()` |
+| **Hooks** | `on()` — register callbacks for `on_add`, `on_update`, `on_delete`, `on_query` |
+| **Async** | `AsyncMemBlock` — full async wrapper for all methods above |
 | **Manage** | `prune()`, `strongest()`, `weakest()`, `verify()`, `stats()`, `export_markdown()` |
 
 ---
@@ -290,11 +379,32 @@ MemBlock (facade)
 ├── DuplicateChecker — Exact + semantic dedup
 ├── CryptoLayer     — AES-256-GCM field-level encryption
 ├── OpLog           — Append-only hash chain for tamper detection
-├── SessionScoping  — Optional session_id isolation per block
+├── HookManager     — Event callbacks (on_add, on_update, on_delete, on_query)
+├── ConflictResolver — LLM-powered ADD/UPDATE/DELETE/NONE decisions
+├── Reranker        — BM25, Cohere, CrossEncoder (pluggable)
+├── HierarchicalScoping — org → project → user → agent → session
 └── StorageAdapter  — SQLite or PostgreSQL (swappable)
 ```
 
 Every component is testable in isolation. The facade composes them into a single clean API.
+
+---
+
+## Roadmap
+
+Features planned for future releases:
+
+- **Multi-language SDKs** — TypeScript and Go clients
+- **REST API server mode** — Run MemBlock as a standalone API server
+- **Multimodal memory** — Store and query images, audio, and documents alongside text
+- **Framework integrations** — LangChain, CrewAI, AutoGen, Vercel AI SDK drop-in support
+- **MCP server** — Model Context Protocol server for IDE and agent integrations
+- **Managed cloud platform** — Optional hosted version for teams that don't want to self-host
+- **Additional vector store backends** — pgvector, Qdrant, Pinecone, ChromaDB support
+- **Token compression** — Smarter context building with LLM-powered summarization
+- **Multi-agent memory sharing** — Shared memory pools between agents with access control
+
+Want a feature prioritized? Open an issue or reach out via GitHub.
 
 ---
 

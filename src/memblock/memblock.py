@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from memblock.block import Block
@@ -10,6 +11,7 @@ from memblock.crypto import CryptoLayerWithPassphrase
 from memblock.decay import DecayEngine
 from memblock.dedup import ContentHasher, DuplicateChecker, DuplicatePolicy
 from memblock.errors import DuplicateBlockError, EncryptionError, ExtractionError, LicenseError
+from memblock.hooks import EventType, HookManager
 from memblock.licensing import LicenseInfo, get_secret, get_stored_license, validate_license
 from memblock.graph import GraphIndex
 from memblock.ops import OpLog, TamperReport
@@ -81,6 +83,13 @@ class MemBlock:
         extract_min_confidence: float = 0.3,
         license_key: str | None = None,
         session_id: str | None = None,
+        org_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+        hooks: dict[str, list] | None = None,
+        reranker: Any = None,
+        auto_extract_on_store: bool = False,
+        conflict_resolution: bool = False,
     ) -> None:
         """
         Initialize MemBlock.
@@ -116,6 +125,22 @@ class MemBlock:
             session_id: Default session ID for all operations. None = single-session mode
                 (all blocks in one global scope). Set this or pass session_id per-call
                 to opt into multi-session scoping.
+            org_id: Default organization ID for hierarchical scoping.
+            project_id: Default project ID for hierarchical scoping.
+            agent_id: Default agent ID for hierarchical scoping.
+            hooks: Pre-register event hooks. Dict mapping event names
+                ("on_add", "on_update", "on_delete", "on_query") to lists of callbacks.
+            reranker: Optional reranker for improving search quality.
+                Use BM25Reranker() (zero deps), CohereReranker(api_key=...),
+                or CrossEncoderReranker() from memblock.rerankers.
+            auto_extract_on_store: When True and an LLM provider is configured,
+                every store() call also runs extraction on the content to
+                automatically derive additional facts, preferences, etc.
+                Extracted blocks are linked via DERIVED_FROM to the original.
+            conflict_resolution: When True and an LLM provider + embeddings
+                are configured, store() will first check for semantically
+                similar existing blocks and use the LLM to decide whether
+                to ADD, UPDATE, DELETE, or skip. Requires embeddings=True.
         """
         # ── License validation (disabled — re-enable for paid tier) ──
         # secret = get_secret()
@@ -132,6 +157,16 @@ class MemBlock:
 
         self._user_id = user_id
         self._session_id = session_id
+        self._org_id = org_id
+        self._project_id = project_id
+        self._agent_id = agent_id
+
+        # Event hooks
+        self._hooks = HookManager()
+        if hooks:
+            for event_name, callbacks in hooks.items():
+                for cb in callbacks:
+                    self._hooks.register(EventType(event_name), cb)
 
         # Parse storage URI
         self._storage = self._create_storage(storage, user_id)
@@ -147,9 +182,11 @@ class MemBlock:
         self._store = BlockStore(self._storage, author=author)
         self._graph = GraphIndex(self._storage, self._store.op_log)
         self._decay = DecayEngine(self._storage)
+        self._reranker = reranker
         self._query = QueryEngine(
             self._storage, self._graph, self._decay,
             embedding_provider=self._embedding_provider,
+            reranker=self._reranker,
         )
         self._context = ContextBuilder(self._storage, self._query, self._graph, self._decay)
 
@@ -173,6 +210,10 @@ class MemBlock:
         self._message_buffer: list[dict[str, str]] = []
         self._message_count: int = 0
         self._extractor = None  # Lazy-initialized
+        self._auto_extract_on_store = auto_extract_on_store
+        self._conflict_resolution = conflict_resolution
+        self._conflict_resolver = None  # Lazy-initialized
+        self._extracting = False  # Prevents infinite recursion
 
     @staticmethod
     def _create_storage(uri: str, user_id: str = "default") -> StorageAdapter:
@@ -242,6 +283,24 @@ class MemBlock:
 
         return None
 
+    # ─── Event Hooks ──────────────────────────────────────────────────────
+
+    def on(self, event: str, callback: Any) -> None:
+        """
+        Register a callback for a memory lifecycle event.
+
+        Args:
+            event: "on_add", "on_update", "on_delete", or "on_query"
+            callback: Function that receives a dict with event data.
+                Sync: def callback(data: dict) -> None
+                Async: async def callback(data: dict) -> None
+        """
+        import inspect
+        if inspect.iscoroutinefunction(callback):
+            self._hooks.register_async(EventType(event), callback)
+        else:
+            self._hooks.register(EventType(event), callback)
+
     # ─── Store Operations ─────────────────────────────────────────────────
 
     def store(
@@ -256,6 +315,10 @@ class MemBlock:
         decay_rate: float = 0.01,
         ttl: int | None = None,
         session_id: str | None = None,
+        org_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Block:
         """
         Store a new memory block.
@@ -270,10 +333,47 @@ class MemBlock:
             encryption_level: NONE, STANDARD, or SENSITIVE
             decay_rate: How fast this memory fades (0 = never)
             ttl: Time-to-live in seconds (None = permanent)
+            session_id: Session scope (overrides default)
+            org_id: Organization scope (overrides default)
+            project_id: Project scope (overrides default)
+            agent_id: Agent scope (overrides default)
+            metadata: Arbitrary key-value metadata for filtering
 
         Returns:
             The created Block, or None if duplicate with SKIP policy.
         """
+        # Conflict resolution via LLM (if enabled)
+        if (
+            self._conflict_resolution
+            and not self._extracting
+            and self._embedding_provider is not None
+            and self._extract_provider_name is not None
+        ):
+            try:
+                similar = self.query(
+                    text_search=content,
+                    semantic=True,
+                    limit=5,
+                    session_id=session_id or self._session_id,
+                )
+                if similar:
+                    from memblock.conflict import ConflictResolver, ConflictActionType
+                    if self._conflict_resolver is None:
+                        extractor_provider = self._init_extractor().provider
+                        self._conflict_resolver = ConflictResolver(provider=extractor_provider)
+                    result = self._conflict_resolver.resolve(content, similar)
+                    for action in result.actions:
+                        if action.action == ConflictActionType.UPDATE and action.block_id:
+                            self.update(action.block_id, content=action.new_content or content)
+                            return self.get(action.block_id)  # type: ignore[return-value]
+                        elif action.action == ConflictActionType.DELETE and action.block_id:
+                            self.delete(action.block_id)
+                        elif action.action == ConflictActionType.NONE:
+                            return None  # type: ignore[return-value]
+                        # ADD falls through to normal store flow
+            except Exception:
+                pass  # conflict resolution failure falls through to normal store
+
         # Check for duplicates before creating
         if self._dedup is not None and self._on_duplicate is not None:
             content_hash = ContentHasher.hash(content)
@@ -321,6 +421,10 @@ class MemBlock:
             decay_rate=decay_rate,
             ttl=ttl,
             session_id=session_id or self._session_id,
+            org_id=org_id or self._org_id,
+            project_id=project_id or self._project_id,
+            agent_id=agent_id or self._agent_id,
+            custom_metadata=metadata,
         )
 
         if encrypted:
@@ -331,6 +435,39 @@ class MemBlock:
         # Use original plaintext content for embedding, not encrypted content
         if self._embedding_provider is not None:
             self._embed_block(block.id, content)
+
+        # Fire on_add hooks
+        self._hooks.emit(EventType.ON_ADD, {
+            "block_id": block.id,
+            "block": block,
+            "content": content,
+            "type": type.value,
+        })
+
+        # Auto-extract additional memories from the content
+        if (
+            self._auto_extract_on_store
+            and not self._extracting
+            and self._extract_provider_name is not None
+        ):
+            self._extracting = True
+            try:
+                result = self.extract(
+                    conversation=content,
+                    provider=self._extract_provider_name,
+                    api_key=self._extract_api_key,
+                    model=self._extract_model,
+                )
+                # Link extracted blocks to the original via DERIVED_FROM
+                for extracted_id in (result.block_ids if result else []):
+                    try:
+                        self.link(extracted_id, block.id, relation=EdgeRelation.DERIVED_FROM)
+                    except Exception:
+                        pass
+            except Exception:
+                pass  # extraction failure should not break store
+            finally:
+                self._extracting = False
 
         return block
 
@@ -369,6 +506,14 @@ class MemBlock:
         if original_content is not None and self._embedding_provider is not None:
             self._embed_block(block_id, original_content)
 
+        # Fire on_update hooks
+        if result is not None:
+            self._hooks.emit(EventType.ON_UPDATE, {
+                "block_id": block_id,
+                "block": result,
+                "updates": updates,
+            })
+
         return result
 
     def delete(self, block_id: str, cascade: bool = False) -> bool:
@@ -377,6 +522,11 @@ class MemBlock:
         # Remove embedding on delete
         if result:
             self._storage.delete_embedding(block_id)
+            # Fire on_delete hooks
+            self._hooks.emit(EventType.ON_DELETE, {
+                "block_id": block_id,
+                "cascade": cascade,
+            })
         return result
 
     # ─── Graph Operations ─────────────────────────────────────────────────
@@ -425,6 +575,10 @@ class MemBlock:
         limit: int = 10,
         semantic: bool = True,
         session_id: str | None = None,
+        org_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+        metadata_filters: dict[str, Any] | None = None,
     ) -> list[Block]:
         """
         Query memory blocks with structured filters.
@@ -438,7 +592,11 @@ class MemBlock:
             sort_by: 'relevance', 'recency', 'access_count', 'strength'
             limit: Maximum results
             semantic: Enable hybrid search when embeddings are available (default True)
-            session_id: Filter by session (overrides default session_id)
+            session_id: Filter by session (overrides default)
+            org_id: Filter by organization (overrides default)
+            project_id: Filter by project (overrides default)
+            agent_id: Filter by agent (overrides default)
+            metadata_filters: Arbitrary key-value filters on custom metadata
 
         Returns:
             List of matching blocks.
@@ -453,6 +611,10 @@ class MemBlock:
             limit=limit,
             semantic=semantic,
             session_id=session_id or self._session_id,
+            org_id=org_id or self._org_id,
+            project_id=project_id or self._project_id,
+            agent_id=agent_id or self._agent_id,
+            metadata_filters=metadata_filters,
         )
 
     # ─── Context Builder ──────────────────────────────────────────────────
@@ -464,6 +626,10 @@ class MemBlock:
         strategy: str = "relevance",
         include_metadata: bool = True,
         session_id: str | None = None,
+        org_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+        metadata_filters: dict[str, Any] | None = None,
     ) -> str:
         """
         Build LLM-ready context from relevant memory blocks.
@@ -473,7 +639,11 @@ class MemBlock:
             token_budget: Maximum tokens in output
             strategy: 'relevance', 'graph_walk', or 'type_grouped'
             include_metadata: Include confidence/source in output
-            session_id: Filter by session (overrides default session_id)
+            session_id: Filter by session (overrides default)
+            org_id: Filter by organization (overrides default)
+            project_id: Filter by project (overrides default)
+            agent_id: Filter by agent (overrides default)
+            metadata_filters: Arbitrary key-value filters on custom metadata
 
         Returns:
             Formatted string for LLM context injection.
@@ -484,6 +654,10 @@ class MemBlock:
             strategy=strategy,
             include_metadata=include_metadata,
             session_id=session_id or self._session_id,
+            org_id=org_id or self._org_id,
+            project_id=project_id or self._project_id,
+            agent_id=agent_id or self._agent_id,
+            metadata_filters=metadata_filters,
         )
 
     # ─── Session Operations ────────────────────────────────────────────────

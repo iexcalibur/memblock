@@ -1,0 +1,208 @@
+"""Conflict resolution — LLM-powered ADD/UPDATE/DELETE/NONE decisions.
+
+When new information arrives, the conflict resolver compares it against
+existing memories and uses an LLM to decide:
+  - ADD: Store as a new memory (no conflict)
+  - UPDATE: Update an existing memory with new information
+  - DELETE: Remove an existing memory that's been contradicted
+  - NONE: Skip — the information is already known or not worth storing
+
+This mirrors Mem0's core "inference mode" but gives you full control.
+
+Usage:
+    from memblock.conflict import ConflictResolver
+
+    resolver = ConflictResolver(provider=OpenAIProvider(api_key="sk-..."))
+    actions = resolver.resolve("User now prefers TypeScript", existing_blocks)
+    # actions = [ConflictAction(action="UPDATE", block_id="blk_abc", ...)]
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+from memblock.block import Block
+
+
+class ConflictActionType(str, Enum):
+    """Possible conflict resolution actions."""
+
+    ADD = "ADD"
+    UPDATE = "UPDATE"
+    DELETE = "DELETE"
+    NONE = "NONE"
+
+
+@dataclass
+class ConflictAction:
+    """A single conflict resolution decision."""
+
+    action: ConflictActionType
+    block_id: str | None = None  # Existing block to UPDATE or DELETE
+    new_content: str | None = None  # New content for ADD or UPDATE
+    reason: str = ""  # LLM's reasoning
+
+
+@dataclass
+class ConflictResult:
+    """Result of conflict resolution."""
+
+    actions: list[ConflictAction] = field(default_factory=list)
+    raw_response: str = ""
+    errors: list[str] = field(default_factory=list)
+
+
+CONFLICT_SYSTEM_PROMPT = """You are a memory conflict resolver. Given NEW information and EXISTING memories, decide what to do.
+
+For each piece of new information, output a JSON array of actions:
+- "action": "ADD" | "UPDATE" | "DELETE" | "NONE"
+- "block_id": ID of the existing block to update/delete (null for ADD/NONE)
+- "new_content": The content to store (for ADD) or the updated text (for UPDATE). Null for DELETE/NONE.
+- "reason": Brief explanation of why this action was chosen
+
+Rules:
+1. ADD: New info that doesn't conflict with or duplicate anything existing
+2. UPDATE: New info that supersedes or refines an existing memory — provide the UPDATED content
+3. DELETE: An existing memory that is now incorrect or contradicted by the new info
+4. NONE: The new info is already captured or too trivial to store
+5. Be conservative — prefer NONE over ADD if the info is already known
+6. When updating, merge the old and new info into a single coherent statement
+7. Only DELETE when the new info clearly contradicts an existing memory
+
+Respond with ONLY the JSON array, no other text."""
+
+CONFLICT_USER_TEMPLATE = """NEW INFORMATION:
+{new_content}
+
+EXISTING MEMORIES:
+{existing_blocks}
+
+Decide what actions to take. Return a JSON array:"""
+
+
+class ConflictResolver:
+    """
+    Resolves conflicts between new and existing memories using an LLM.
+
+    Requires an LLM provider (from memblock.extraction).
+    """
+
+    def __init__(
+        self,
+        provider: Any,  # LLMProvider — Any to avoid circular import
+        system_prompt: str | None = None,
+    ) -> None:
+        self.provider = provider
+        self.system_prompt = system_prompt or CONFLICT_SYSTEM_PROMPT
+
+    def resolve(
+        self,
+        new_content: str,
+        existing_blocks: list[Block],
+    ) -> ConflictResult:
+        """
+        Resolve conflicts between new content and existing blocks.
+
+        Args:
+            new_content: The new information to evaluate
+            existing_blocks: Top-K semantically similar existing blocks
+
+        Returns:
+            ConflictResult with a list of ConflictActions.
+        """
+        result = ConflictResult()
+
+        if not existing_blocks:
+            # No existing blocks — just ADD
+            result.actions.append(ConflictAction(
+                action=ConflictActionType.ADD,
+                new_content=new_content,
+                reason="No existing memories to conflict with",
+            ))
+            return result
+
+        # Format existing blocks
+        existing_text = "\n".join(
+            f"- [ID: {b.id}] {b.content} (type: {b.type.value}, confidence: {b.metadata.confidence:.2f})"
+            for b in existing_blocks
+        )
+
+        user_prompt = CONFLICT_USER_TEMPLATE.format(
+            new_content=new_content,
+            existing_blocks=existing_text,
+        )
+
+        try:
+            raw_response = self.provider.complete(self.system_prompt, user_prompt)
+            result.raw_response = raw_response
+        except Exception as e:
+            result.errors.append(f"LLM call failed: {e}")
+            # Fall back to ADD on LLM failure
+            result.actions.append(ConflictAction(
+                action=ConflictActionType.ADD,
+                new_content=new_content,
+                reason="Fallback: LLM conflict resolution failed",
+            ))
+            return result
+
+        try:
+            actions = self._parse_response(raw_response, existing_blocks)
+            result.actions = actions
+        except Exception as e:
+            result.errors.append(f"Parse failed: {e}")
+            result.actions.append(ConflictAction(
+                action=ConflictActionType.ADD,
+                new_content=new_content,
+                reason="Fallback: could not parse LLM response",
+            ))
+
+        return result
+
+    def _parse_response(
+        self,
+        raw: str,
+        existing_blocks: list[Block],
+    ) -> list[ConflictAction]:
+        """Parse the LLM response into ConflictActions."""
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.split("\n")
+            lines = [line for line in lines if not line.strip().startswith("```")]
+            cleaned = "\n".join(lines)
+
+        parsed = json.loads(cleaned)
+
+        if isinstance(parsed, dict):
+            for key in ("actions", "results", "decisions"):
+                if key in parsed and isinstance(parsed[key], list):
+                    parsed = parsed[key]
+                    break
+            else:
+                parsed = [parsed]
+
+        if not isinstance(parsed, list):
+            return []
+
+        valid_ids = {b.id for b in existing_blocks}
+        actions: list[ConflictAction] = []
+
+        for item in parsed:
+            action_type = ConflictActionType(item.get("action", "NONE").upper())
+            block_id = item.get("block_id")
+
+            # Validate block_id exists for UPDATE/DELETE
+            if action_type in (ConflictActionType.UPDATE, ConflictActionType.DELETE):
+                if block_id not in valid_ids:
+                    continue  # Skip invalid references
+
+            actions.append(ConflictAction(
+                action=action_type,
+                block_id=block_id,
+                new_content=item.get("new_content"),
+                reason=item.get("reason", ""),
+            ))
+
+        return actions

@@ -49,6 +49,10 @@ class BlockStore:
         ttl: int | None = None,
         created_by: str | None = None,
         session_id: str | None = None,
+        org_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+        custom_metadata: dict[str, Any] | None = None,
     ) -> Block:
         """
         Create a new memory block.
@@ -67,6 +71,10 @@ class BlockStore:
                 decay_rate=decay_rate,
                 ttl=ttl,
                 session_id=session_id,
+                org_id=org_id,
+                project_id=project_id,
+                agent_id=agent_id,
+                custom_metadata=custom_metadata,
             ),
             encryption_level=encryption_level,
             parent_id=parent_id,

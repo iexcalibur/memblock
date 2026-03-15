@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memblock"
-version = "0.3.0"
+version = "0.4.0"
 description = "Typed block tree + knowledge graph memory SDK for AI agents"
 readme = "README.md"
 license = {text = "Proprietary"}
@@ -42,6 +42,8 @@ llm = [
 embeddings = ["fastembed>=0.3"]
 embeddings-openai = ["httpx>=0.24"]
 embeddings-gemini = ["httpx>=0.24"]
+reranker-cohere = ["httpx>=0.24"]
+reranker-cross-encoder = ["sentence-transformers>=2.0"]
 all = [
     "memblock[postgres]",
     "memblock[tokens]",

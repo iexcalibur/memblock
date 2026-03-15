@@ -112,6 +112,10 @@ class PostgreSQLAdapter(StorageAdapter):
                     decay_rate REAL NOT NULL DEFAULT 0.01,
                     ttl INTEGER,
                     session_id TEXT,
+                    org_id TEXT,
+                    project_id TEXT,
+                    agent_id TEXT,
+                    custom_metadata JSONB,
                     PRIMARY KEY (block_id, user_id),
                     FOREIGN KEY (block_id, user_id)
                         REFERENCES {self.schema}.memblock_blocks(id, user_id) ON DELETE CASCADE
@@ -278,8 +282,9 @@ class PostgreSQLAdapter(StorageAdapter):
             cur.execute(f"""
                 INSERT INTO {self.schema}.memblock_metadata
                     (block_id, user_id, confidence, source, created_at, created_by,
-                     access_count, last_accessed, decay_rate, ttl, session_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     access_count, last_accessed, decay_rate, ttl, session_id,
+                     org_id, project_id, agent_id, custom_metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (block_id, user_id) DO UPDATE SET
                     confidence = EXCLUDED.confidence,
                     source = EXCLUDED.source,
@@ -288,7 +293,11 @@ class PostgreSQLAdapter(StorageAdapter):
                     last_accessed = EXCLUDED.last_accessed,
                     decay_rate = EXCLUDED.decay_rate,
                     ttl = EXCLUDED.ttl,
-                    session_id = EXCLUDED.session_id
+                    session_id = EXCLUDED.session_id,
+                    org_id = EXCLUDED.org_id,
+                    project_id = EXCLUDED.project_id,
+                    agent_id = EXCLUDED.agent_id,
+                    custom_metadata = EXCLUDED.custom_metadata
             """, (
                 block.id,
                 self.user_id,
@@ -301,6 +310,10 @@ class PostgreSQLAdapter(StorageAdapter):
                 block.metadata.decay_rate,
                 block.metadata.ttl,
                 block.metadata.session_id,
+                block.metadata.org_id,
+                block.metadata.project_id,
+                block.metadata.agent_id,
+                json.dumps(block.metadata.custom_metadata) if block.metadata.custom_metadata else None,
             ))
 
         self.conn.commit()
@@ -309,7 +322,8 @@ class PostgreSQLAdapter(StorageAdapter):
         with self.conn.cursor() as cur:
             cur.execute(f"""
                 SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
-                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
+                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
                 FROM {self.schema}.memblock_blocks b
                 LEFT JOIN {self.schema}.memblock_metadata m
                     ON b.id = m.block_id AND b.user_id = m.user_id
@@ -393,6 +407,24 @@ class PostgreSQLAdapter(StorageAdapter):
             conditions.append("m.session_id = %s")
             params.append(filters["session_id"])
 
+        if "org_id" in filters:
+            conditions.append("m.org_id = %s")
+            params.append(filters["org_id"])
+
+        if "project_id" in filters:
+            conditions.append("m.project_id = %s")
+            params.append(filters["project_id"])
+
+        if "agent_id" in filters:
+            conditions.append("m.agent_id = %s")
+            params.append(filters["agent_id"])
+
+        if "metadata_filters" in filters:
+            for key, value in filters["metadata_filters"].items():
+                conditions.append("m.custom_metadata->>%s = %s")
+                params.append(key)
+                params.append(str(value) if not isinstance(value, str) else value)
+
         if "tags" in filters:
             tag_list = filters["tags"]
             tag_conditions = []
@@ -425,7 +457,8 @@ class PostgreSQLAdapter(StorageAdapter):
 
         sql = f"""
             SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
-                   m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
+                   m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
             FROM {self.schema}.memblock_blocks b
             LEFT JOIN {self.schema}.memblock_metadata m
                 ON b.id = m.block_id AND b.user_id = m.user_id
@@ -448,7 +481,8 @@ class PostgreSQLAdapter(StorageAdapter):
             if include_deleted:
                 cur.execute(f"""
                     SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
-                           m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
+                           m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
                     FROM {self.schema}.memblock_blocks b
                     LEFT JOIN {self.schema}.memblock_metadata m
                         ON b.id = m.block_id AND b.user_id = m.user_id
@@ -458,7 +492,8 @@ class PostgreSQLAdapter(StorageAdapter):
             else:
                 cur.execute(f"""
                     SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
-                           m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
+                           m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
                     FROM {self.schema}.memblock_blocks b
                     LEFT JOIN {self.schema}.memblock_metadata m
                         ON b.id = m.block_id AND b.user_id = m.user_id
@@ -668,6 +703,10 @@ class PostgreSQLAdapter(StorageAdapter):
                 decay_rate=row.get("decay_rate") or 0.01,
                 ttl=row.get("ttl"),
                 session_id=row.get("session_id"),
+                org_id=row.get("org_id"),
+                project_id=row.get("project_id"),
+                agent_id=row.get("agent_id"),
+                custom_metadata=row.get("custom_metadata") if isinstance(row.get("custom_metadata"), dict) else (json.loads(row["custom_metadata"]) if row.get("custom_metadata") else None),
             ),
             encryption_level=EncryptionLevel(row["encryption_level"]),
             encrypted=bool(row["encrypted"]),
@@ -685,7 +724,8 @@ class PostgreSQLAdapter(StorageAdapter):
         with self.conn.cursor() as cur:
             cur.execute(f"""
                 SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
-                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id
+                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
                 FROM {self.schema}.memblock_blocks b
                 LEFT JOIN {self.schema}.memblock_metadata m
                     ON b.id = m.block_id AND b.user_id = m.user_id

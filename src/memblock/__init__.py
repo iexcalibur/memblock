@@ -13,7 +13,7 @@ Usage:
     mem.verify()  # check tamper detection
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from memblock.block import Block
 from memblock.context import ContextBuilder
@@ -22,6 +22,7 @@ from memblock.decay import DecayEngine
 from memblock.dedup import DuplicatePolicy
 from memblock.errors import (
     BlockNotFoundError,
+    ConflictResolutionError,
     DuplicateBlockError,
     EncryptionError,
     ExtractionError,
@@ -32,6 +33,7 @@ from memblock.errors import (
     ValidationError,
 )
 from memblock.graph import GraphIndex
+from memblock.hooks import EventType, HookManager
 from memblock.ops import OpLog, TamperReport
 from memblock.query import QueryEngine
 from memblock.schema import BlockSchema, SchemaValidationError
@@ -50,8 +52,10 @@ from memblock.types import (
 )
 
 from memblock.memblock import MemBlock
+from memblock.async_memblock import AsyncMemBlock
 
 __all__ = [
+    "AsyncMemBlock",
     "MemBlock",
     "Block",
     "BlockMetadata",
@@ -59,6 +63,7 @@ __all__ = [
     "BlockSchema",
     "BlockStore",
     "BlockType",
+    "ConflictResolutionError",
     "ContextBuilder",
     "CryptoLayer",
     "CryptoLayerWithPassphrase",
@@ -69,8 +74,10 @@ __all__ = [
     "EdgeRelation",
     "EncryptionError",
     "EncryptionLevel",
+    "EventType",
     "ExtractionError",
     "GraphIndex",
+    "HookManager",
     "LicenseError",
     "MemBlockError",
     "MigrationError",

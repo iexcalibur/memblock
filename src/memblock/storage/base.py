@@ -61,6 +61,10 @@ class StorageAdapter(ABC):
         - text_search: str (FTS)
         - parent_id: str
         - session_id: str (filter by session)
+        - org_id: str (filter by organization)
+        - project_id: str (filter by project)
+        - agent_id: str (filter by agent)
+        - metadata_filters: dict (arbitrary key-value filters on custom_metadata)
         - deleted: bool (default False)
         - limit: int
         - sort_by: str (created_at, access_count, confidence)

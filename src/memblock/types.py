@@ -130,6 +130,10 @@ class BlockMetadata:
     decay_rate: float = 0.01  # how fast memory fades (0 = never)
     ttl: int | None = None  # seconds until expiry, None = permanent
     session_id: str | None = None  # optional session scope
+    org_id: str | None = None  # optional organization scope
+    project_id: str | None = None  # optional project scope
+    agent_id: str | None = None  # optional agent scope
+    custom_metadata: dict[str, Any] | None = None  # arbitrary key-value metadata
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -142,6 +146,10 @@ class BlockMetadata:
             "decay_rate": self.decay_rate,
             "ttl": self.ttl,
             "session_id": self.session_id,
+            "org_id": self.org_id,
+            "project_id": self.project_id,
+            "agent_id": self.agent_id,
+            "custom_metadata": self.custom_metadata,
         }
 
     @classmethod
@@ -156,6 +164,10 @@ class BlockMetadata:
             decay_rate=data.get("decay_rate", 0.01),
             ttl=data.get("ttl"),
             session_id=data.get("session_id"),
+            org_id=data.get("org_id"),
+            project_id=data.get("project_id"),
+            agent_id=data.get("agent_id"),
+            custom_metadata=data.get("custom_metadata"),
         )
 
 

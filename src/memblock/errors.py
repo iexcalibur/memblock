@@ -46,3 +46,8 @@ class EncryptionError(MemBlockError):
 class LicenseError(MemBlockError):
     """Raised when license validation fails (missing, expired, or tampered)."""
     pass
+
+
+class ConflictResolutionError(MemBlockError):
+    """Raised when LLM-based conflict resolution fails."""
+    pass
