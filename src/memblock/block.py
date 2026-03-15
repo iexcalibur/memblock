@@ -49,6 +49,9 @@ class Block:
     # Tags for categorization
     tags: list[str] = field(default_factory=list)
 
+    # Content hash for deduplication
+    content_hash: str = ""
+
     # Soft delete
     deleted: bool = False
 
@@ -67,6 +70,7 @@ class Block:
             "version": self.version,
             "op_hash": self.op_hash,
             "tags": self.tags,
+            "content_hash": self.content_hash,
             "deleted": self.deleted,
         }
 
@@ -86,6 +90,7 @@ class Block:
             version=data.get("version", 1),
             op_hash=data.get("op_hash", ""),
             tags=data.get("tags", []),
+            content_hash=data.get("content_hash", ""),
             deleted=data.get("deleted", False),
         )
 

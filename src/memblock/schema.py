@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from memblock.block import Block
+from memblock.errors import ValidationError
 from memblock.types import BlockType, EdgeRelation, EncryptionLevel, SourceType
 
 
-class SchemaValidationError(Exception):
-    """Raised when a block or edge fails validation."""
+class SchemaValidationError(ValidationError):
+    """Raised when a block or edge fails validation.
+
+    Deprecated: use ValidationError instead. Will be removed in v1.0.
+    """
     pass
 
 

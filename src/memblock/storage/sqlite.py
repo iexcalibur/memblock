@@ -38,6 +38,10 @@ class SQLiteAdapter(StorageAdapter):
         self._conn: sqlite3.Connection | None = None
 
     @property
+    def adapter_type(self) -> str:
+        return "sqlite"
+
+    @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(self.db_path)
@@ -130,6 +134,17 @@ class SQLiteAdapter(StorageAdapter):
 
         self.conn.commit()
 
+        # Run schema migrations
+        from memblock.migrations import MigrationRunner
+        MigrationRunner(self).run()
+
+    def run_migration_sql(self, sql: str, params: tuple | None = None) -> None:
+        cur = self.conn.cursor()
+        if params:
+            cur.execute(sql, params)
+        else:
+            cur.execute(sql)
+
     # ─── Block Operations ─────────────────────────────────────────────────
 
     def save_block(self, block: Block) -> None:
@@ -138,8 +153,8 @@ class SQLiteAdapter(StorageAdapter):
         cur.execute(
             """INSERT OR REPLACE INTO blocks
                (id, type, content, encryption_level, encrypted,
-                parent_id, children_ids, version, op_hash, tags, deleted, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                parent_id, children_ids, version, op_hash, tags, deleted, created_at, content_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 block.id,
                 block.type.value,
@@ -153,6 +168,7 @@ class SQLiteAdapter(StorageAdapter):
                 json.dumps(block.tags),
                 int(block.deleted),
                 block.metadata.created_at.isoformat(),
+                block.content_hash,
             ),
         )
 
@@ -502,8 +518,26 @@ class SQLiteAdapter(StorageAdapter):
             version=row["version"],
             op_hash=row["op_hash"],
             tags=json.loads(row["tags"]),
+            content_hash=row["content_hash"] if "content_hash" in row.keys() else "",
             deleted=bool(row["deleted"]),
         )
+
+    def get_block_by_content_hash(self, content_hash: str) -> Block | None:
+        """Find a non-deleted block by content hash."""
+        cur = self.conn.cursor()
+        cur.execute(
+            """SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
+                      m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl
+               FROM blocks b
+               LEFT JOIN block_metadata m ON b.id = m.block_id
+               WHERE b.content_hash = ? AND b.deleted = 0
+               LIMIT 1""",
+            (content_hash,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_block(row)
 
     def _row_to_edge(self, row: sqlite3.Row) -> Edge:
         """Convert a database row to an Edge object."""

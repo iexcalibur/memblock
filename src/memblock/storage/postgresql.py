@@ -67,6 +67,10 @@ class PostgreSQLAdapter(StorageAdapter):
         self._conn: psycopg.Connection | None = None
 
     @property
+    def adapter_type(self) -> str:
+        return "postgresql"
+
+    @property
     def conn(self) -> psycopg.Connection:
         if self._conn is None or self._conn.closed:
             self._conn = psycopg.connect(self.dsn, row_factory=dict_row, autocommit=False)
@@ -221,6 +225,17 @@ class PostgreSQLAdapter(StorageAdapter):
 
         self.conn.commit()
 
+        # Run schema migrations
+        from memblock.migrations import MigrationRunner
+        MigrationRunner(self).run()
+
+    def run_migration_sql(self, sql: str, params: tuple | None = None) -> None:
+        with self.conn.cursor() as cur:
+            if params:
+                cur.execute(sql, params)
+            else:
+                cur.execute(sql)
+
     # ─── Block Operations ─────────────────────────────────────────────────
 
     def save_block(self, block: Block) -> None:
@@ -228,8 +243,8 @@ class PostgreSQLAdapter(StorageAdapter):
             cur.execute(f"""
                 INSERT INTO {self.schema}.memblock_blocks
                     (id, user_id, type, content, encryption_level, encrypted,
-                     parent_id, children_ids, version, op_hash, tags, deleted, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     parent_id, children_ids, version, op_hash, tags, deleted, created_at, content_hash)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id, user_id) DO UPDATE SET
                     type = EXCLUDED.type,
                     content = EXCLUDED.content,
@@ -240,7 +255,8 @@ class PostgreSQLAdapter(StorageAdapter):
                     version = EXCLUDED.version,
                     op_hash = EXCLUDED.op_hash,
                     tags = EXCLUDED.tags,
-                    deleted = EXCLUDED.deleted
+                    deleted = EXCLUDED.deleted,
+                    content_hash = EXCLUDED.content_hash
             """, (
                 block.id,
                 self.user_id,
@@ -255,6 +271,7 @@ class PostgreSQLAdapter(StorageAdapter):
                 json.dumps(block.tags),
                 block.deleted,
                 block.metadata.created_at.isoformat(),
+                block.content_hash,
             ))
 
             cur.execute(f"""
@@ -651,8 +668,26 @@ class PostgreSQLAdapter(StorageAdapter):
             version=row["version"],
             op_hash=row["op_hash"],
             tags=tags,
+            content_hash=row.get("content_hash", ""),
             deleted=bool(row["deleted"]),
         )
+
+    def get_block_by_content_hash(self, content_hash: str) -> Block | None:
+        """Find a non-deleted block by content hash."""
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
+                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl
+                FROM {self.schema}.memblock_blocks b
+                LEFT JOIN {self.schema}.memblock_metadata m
+                    ON b.id = m.block_id AND b.user_id = m.user_id
+                WHERE b.content_hash = %s AND b.user_id = %s AND b.deleted = FALSE
+                LIMIT 1
+            """, (content_hash, self.user_id))
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_block(row)
 
     def _row_to_edge(self, row: dict) -> Edge:
         created_at = row["created_at"]

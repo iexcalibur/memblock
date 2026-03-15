@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memblock"
-version = "0.1.0"
+version = "0.2.0"
 description = "Typed block tree + knowledge graph memory SDK for AI agents"
 readme = "README.md"
 license = "MIT"
@@ -17,11 +17,20 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+
 dependencies = [
     "cryptography>=41.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/memblock/memblock"
+Repository = "https://github.com/memblock/memblock"
+"Bug Tracker" = "https://github.com/memblock/memblock/issues"
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
@@ -44,6 +53,9 @@ dev = [
     "pytest-cov>=4.0",
     "psycopg[binary]>=3.1",
 ]
+
+[project.scripts]
+memblock = "memblock.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

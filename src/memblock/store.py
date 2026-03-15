@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from memblock.block import Block
+from memblock.dedup import ContentHasher
+from memblock.errors import BlockNotFoundError, StorageError
 from memblock.ops import OpLog
 from memblock.schema import BlockSchema, SchemaValidationError
 from memblock.storage.base import StorageAdapter
@@ -67,6 +69,7 @@ class BlockStore:
             encryption_level=encryption_level,
             parent_id=parent_id,
             tags=tags or [],
+            content_hash=ContentHasher.hash(content),
         )
 
         # Validate
@@ -121,6 +124,13 @@ class BlockStore:
         block = self.storage.get_block(block_id)
         if block is None or block.deleted:
             return None
+        return block
+
+    def get_or_raise(self, block_id: str) -> Block:
+        """Retrieve a block by ID, raising BlockNotFoundError if not found."""
+        block = self.get(block_id)
+        if block is None:
+            raise BlockNotFoundError(f"Block {block_id} not found")
         return block
 
     def update(self, block_id: str, **updates: Any) -> Block | None:

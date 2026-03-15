@@ -8,6 +8,8 @@ from memblock.block import Block
 from memblock.context import ContextBuilder
 from memblock.crypto import CryptoLayerWithPassphrase
 from memblock.decay import DecayEngine
+from memblock.dedup import ContentHasher, DuplicateChecker, DuplicatePolicy
+from memblock.errors import DuplicateBlockError, EncryptionError, ExtractionError
 from memblock.graph import GraphIndex
 from memblock.ops import OpLog, TamperReport
 from memblock.query import QueryEngine
@@ -68,6 +70,14 @@ class MemBlock:
         embeddings: bool | str = False,
         embeddings_api_key: str | None = None,
         embeddings_model: str | None = None,
+        on_duplicate: DuplicatePolicy | str | None = None,
+        similarity_threshold: float = 0.95,
+        auto_extract: bool = False,
+        extract_provider: str | None = None,
+        extract_api_key: str | None = None,
+        extract_model: str | None = None,
+        extract_every: int = 100,
+        extract_min_confidence: float = 0.3,
     ) -> None:
         """
         Initialize MemBlock.
@@ -88,6 +98,18 @@ class MemBlock:
                 - "gemini": Gemini text-embedding-004 (requires embeddings_api_key)
             embeddings_api_key: API key for OpenAI/Gemini embedding providers.
             embeddings_model: Override the default embedding model name.
+            on_duplicate: Deduplication policy. None = no dedup (default).
+                - "error": raise DuplicateBlockError
+                - "skip": return None silently
+                - "return_existing": return the existing block
+                - "merge": merge tags/confidence, return updated block
+            similarity_threshold: Cosine similarity threshold for semantic dedup (0.0-1.0).
+            auto_extract: Enable opt-in auto-extraction from buffered messages.
+            extract_provider: LLM provider for extraction ("openai", "anthropic").
+            extract_api_key: API key for extraction provider.
+            extract_model: Model name override for extraction.
+            extract_every: Trigger extraction every N messages (default 100).
+            extract_min_confidence: Minimum confidence for extracted blocks (default 0.3).
         """
         self._user_id = user_id
 
@@ -110,6 +132,27 @@ class MemBlock:
             embedding_provider=self._embedding_provider,
         )
         self._context = ContextBuilder(self._storage, self._query, self._graph, self._decay)
+
+        # Deduplication
+        if isinstance(on_duplicate, str):
+            on_duplicate = DuplicatePolicy(on_duplicate)
+        self._on_duplicate = on_duplicate
+        self._dedup = DuplicateChecker(
+            self._storage,
+            embedding_provider=self._embedding_provider,
+            similarity_threshold=similarity_threshold,
+        ) if on_duplicate is not None else None
+
+        # Auto-extraction
+        self._auto_extract = auto_extract
+        self._extract_provider_name = extract_provider
+        self._extract_api_key = extract_api_key
+        self._extract_model = extract_model
+        self._extract_every = extract_every
+        self._extract_min_confidence = extract_min_confidence
+        self._message_buffer: list[dict[str, str]] = []
+        self._message_count: int = 0
+        self._extractor = None  # Lazy-initialized
 
     @staticmethod
     def _create_storage(uri: str, user_id: str = "default") -> StorageAdapter:
@@ -208,13 +251,42 @@ class MemBlock:
             ttl: Time-to-live in seconds (None = permanent)
 
         Returns:
-            The created Block.
+            The created Block, or None if duplicate with SKIP policy.
         """
+        # Check for duplicates before creating
+        if self._dedup is not None and self._on_duplicate is not None:
+            content_hash = ContentHasher.hash(content)
+            existing = self._dedup.check(content, content_hash)
+            if existing is not None:
+                if self._on_duplicate == DuplicatePolicy.ERROR:
+                    raise DuplicateBlockError(
+                        f"Duplicate content detected (block {existing.id})"
+                    )
+                elif self._on_duplicate == DuplicatePolicy.SKIP:
+                    return None  # type: ignore[return-value]
+                elif self._on_duplicate == DuplicatePolicy.RETURN_EXISTING:
+                    return existing
+                elif self._on_duplicate == DuplicatePolicy.MERGE:
+                    # Merge tags and take higher confidence
+                    merged_tags = list(set(existing.tags + (tags or [])))
+                    merged_confidence = max(existing.metadata.confidence, confidence)
+                    self.update(
+                        existing.id,
+                        tags=merged_tags,
+                        confidence=merged_confidence,
+                    )
+                    existing.tags = merged_tags
+                    existing.metadata.confidence = merged_confidence
+                    return existing
+
         # Encrypt if needed
         stored_content = content
         encrypted = False
         if encryption_level != EncryptionLevel.NONE and self._crypto.enabled:
-            stored_content = self._crypto.seal(content, encryption_level)
+            try:
+                stored_content = self._crypto.seal(content, encryption_level)
+            except Exception as e:
+                raise EncryptionError(f"Failed to encrypt block content: {e}") from e
             encrypted = True
 
         block = self._store.create(
@@ -251,7 +323,10 @@ class MemBlock:
             return None
 
         if decrypt and block.encrypted and self._crypto.enabled:
-            block.content = self._crypto.open(block.content, block.encryption_level)
+            try:
+                block.content = self._crypto.open(block.content, block.encryption_level)
+            except Exception as e:
+                raise EncryptionError(f"Failed to decrypt block {block_id}: {e}") from e
 
         return block
 
@@ -416,24 +491,29 @@ class MemBlock:
         )
 
         if api_key is None:
-            raise ValueError("api_key is required for auto-extraction")
+            raise ExtractionError("api_key is required for auto-extraction")
 
-        if provider == "openai":
-            llm_provider = OpenAIProvider(
-                api_key=api_key,
-                model=model or "gpt-4o-mini",
-                base_url=base_url,
-            )
-        elif provider == "anthropic":
-            llm_provider = AnthropicProvider(
-                api_key=api_key,
-                model=model or "claude-sonnet-4-20250514",
-            )
-        else:
-            raise ValueError(f"Unknown provider: {provider}. Use 'openai' or 'anthropic'.")
+        try:
+            if provider == "openai":
+                llm_provider = OpenAIProvider(
+                    api_key=api_key,
+                    model=model or "gpt-4o-mini",
+                    base_url=base_url,
+                )
+            elif provider == "anthropic":
+                llm_provider = AnthropicProvider(
+                    api_key=api_key,
+                    model=model or "claude-sonnet-4-20250514",
+                )
+            else:
+                raise ExtractionError(f"Unknown provider: {provider}. Use 'openai' or 'anthropic'.")
 
-        extractor = LLMExtractor(provider=llm_provider)
-        return extractor.extract(conversation, memblock=self)
+            extractor = LLMExtractor(provider=llm_provider)
+            return extractor.extract(conversation, memblock=self)
+        except ExtractionError:
+            raise
+        except Exception as e:
+            raise ExtractionError(f"Extraction failed: {e}") from e
 
     def extract_messages(
         self,
@@ -461,17 +541,122 @@ class MemBlock:
         )
 
         if api_key is None:
-            raise ValueError("api_key is required for auto-extraction")
+            raise ExtractionError("api_key is required for auto-extraction")
 
-        if provider == "openai":
+        try:
+            if provider == "openai":
+                llm_provider = OpenAIProvider(api_key=api_key, model=model or "gpt-4o-mini")
+            elif provider == "anthropic":
+                llm_provider = AnthropicProvider(api_key=api_key, model=model or "claude-sonnet-4-20250514")
+            else:
+                raise ExtractionError(f"Unknown provider: {provider}")
+
+            extractor = LLMExtractor(provider=llm_provider)
+            return extractor.extract_from_messages(messages, memblock=self)
+        except ExtractionError:
+            raise
+        except Exception as e:
+            raise ExtractionError(f"Extraction failed: {e}") from e
+
+    # ─── Opt-in Auto-Extraction ──────────────────────────────────────────
+
+    def add_message(self, role: str, content: str) -> Any:
+        """
+        Buffer a message for auto-extraction.
+
+        When auto_extract=True and message count reaches extract_every,
+        extraction is triggered automatically. Returns ExtractionResult
+        when extraction runs, None otherwise.
+
+        On extraction failure, the buffer is preserved for retry via flush_extraction().
+        """
+        self._message_buffer.append({"role": role, "content": content})
+        self._message_count += 1
+
+        if (
+            self._auto_extract
+            and self._message_count % self._extract_every == 0
+            and len(self._message_buffer) > 0
+        ):
+            return self._run_extraction()
+
+        return None
+
+    def flush_extraction(self) -> Any:
+        """
+        Manually trigger extraction on the current message buffer.
+
+        On success: clears the buffer and returns ExtractionResult.
+        On failure: keeps the buffer intact, returns ExtractionResult with errors.
+        """
+        if not self._message_buffer:
+            from memblock.extraction import ExtractionResult
+            return ExtractionResult(provider="none", errors=["No messages in buffer"])
+
+        return self._run_extraction()
+
+    def _init_extractor(self) -> Any:
+        """Lazily initialize the LLM extractor from configured params."""
+        if self._extractor is not None:
+            return self._extractor
+
+        from memblock.extraction import (
+            LLMExtractor,
+            OpenAIProvider,
+            AnthropicProvider,
+            CallableProvider,
+        )
+
+        provider = self._extract_provider_name
+        api_key = self._extract_api_key
+        model = self._extract_model
+
+        if provider is None:
+            raise ExtractionError(
+                "extract_provider is required when auto_extract=True. "
+                "Use 'openai' or 'anthropic'."
+            )
+
+        if callable(provider):
+            llm_provider = CallableProvider(fn=provider, provider_name="custom")
+        elif provider == "openai":
+            if not api_key:
+                raise ExtractionError("extract_api_key is required for OpenAI extraction")
             llm_provider = OpenAIProvider(api_key=api_key, model=model or "gpt-4o-mini")
         elif provider == "anthropic":
+            if not api_key:
+                raise ExtractionError("extract_api_key is required for Anthropic extraction")
             llm_provider = AnthropicProvider(api_key=api_key, model=model or "claude-sonnet-4-20250514")
         else:
-            raise ValueError(f"Unknown provider: {provider}")
+            raise ExtractionError(f"Unknown extract_provider: {provider}")
 
-        extractor = LLMExtractor(provider=llm_provider)
-        return extractor.extract_from_messages(messages, memblock=self)
+        self._extractor = LLMExtractor(
+            provider=llm_provider,
+            min_confidence=self._extract_min_confidence,
+        )
+        return self._extractor
+
+    def _run_extraction(self) -> Any:
+        """Run extraction on the current buffer. Clears buffer only on success."""
+        from memblock.extraction import ExtractionResult
+
+        try:
+            extractor = self._init_extractor()
+        except ExtractionError as e:
+            return ExtractionResult(errors=[str(e)])
+
+        try:
+            result = extractor.extract_from_messages(
+                self._message_buffer, memblock=self
+            )
+        except Exception as e:
+            return ExtractionResult(errors=[f"Extraction failed: {e}"])
+
+        # Only clear buffer on success (no errors or at least some blocks created)
+        if not result.errors or result.blocks_created > 0:
+            self._message_buffer = []
+
+        return result
 
     # ─── Integrity ────────────────────────────────────────────────────────
 

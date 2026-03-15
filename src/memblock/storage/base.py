@@ -13,8 +13,19 @@ class StorageAdapter(ABC):
     """
     Abstract base class for all MemBlock storage backends.
 
-    Implementations: SQLiteAdapter (local), PostgreSQLAdapter (cloud - future).
+    Implementations: SQLiteAdapter (local), PostgreSQLAdapter (cloud/multi-user).
     """
+
+    # ─── Adapter Identity ─────────────────────────────────────────────────
+
+    @property
+    def adapter_type(self) -> str:
+        """Return the adapter type identifier ('sqlite' or 'postgresql')."""
+        return "unknown"
+
+    def run_migration_sql(self, sql: str, params: tuple | None = None) -> None:
+        """Execute a migration SQL statement. Override in subclass."""
+        pass
 
     # ─── Block Operations ─────────────────────────────────────────────────
 
@@ -124,6 +135,12 @@ class StorageAdapter(ABC):
     def delete_embedding(self, block_id: str) -> None:
         """Delete the embedding for a block. Override in subclass."""
         pass
+
+    # ─── Deduplication ────────────────────────────────────────────────────
+
+    def get_block_by_content_hash(self, content_hash: str) -> Block | None:
+        """Get a block by content hash. Override in subclass for dedup support."""
+        return None
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
 

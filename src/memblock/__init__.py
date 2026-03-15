@@ -13,12 +13,23 @@ Usage:
     mem.verify()  # check tamper detection
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from memblock.block import Block
 from memblock.context import ContextBuilder
 from memblock.crypto import CryptoLayer, CryptoLayerWithPassphrase
 from memblock.decay import DecayEngine
+from memblock.dedup import DuplicatePolicy
+from memblock.errors import (
+    BlockNotFoundError,
+    DuplicateBlockError,
+    EncryptionError,
+    ExtractionError,
+    MemBlockError,
+    MigrationError,
+    StorageError,
+    ValidationError,
+)
 from memblock.graph import GraphIndex
 from memblock.ops import OpLog, TamperReport
 from memblock.query import QueryEngine
@@ -43,6 +54,7 @@ __all__ = [
     "MemBlock",
     "Block",
     "BlockMetadata",
+    "BlockNotFoundError",
     "BlockSchema",
     "BlockStore",
     "BlockType",
@@ -50,10 +62,16 @@ __all__ = [
     "CryptoLayer",
     "CryptoLayerWithPassphrase",
     "DecayEngine",
+    "DuplicateBlockError",
+    "DuplicatePolicy",
     "Edge",
     "EdgeRelation",
+    "EncryptionError",
     "EncryptionLevel",
+    "ExtractionError",
     "GraphIndex",
+    "MemBlockError",
+    "MigrationError",
     "OpAction",
     "OpLog",
     "Operation",
@@ -62,5 +80,7 @@ __all__ = [
     "SourceType",
     "SQLiteAdapter",
     "StorageAdapter",
+    "StorageError",
     "TamperReport",
+    "ValidationError",
 ]
