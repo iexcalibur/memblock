@@ -107,24 +107,39 @@ Let's be direct about where Mem0 wins outright:
 - **Setup simplicity** — `pip install` + one line of Python. No Docker, no Neo4j, no API keys needed for basic use.
 - **Cost** — One license, no subscriptions. Graph, encryption, decay, sessions — all included.
 
-### When to Choose What
+### Who should choose MemBlock vs Mem0
 
-**Choose Mem0 if:**
-- You need a managed cloud service and don't want to host anything
-- You're building in JavaScript/TypeScript or need REST API access
-- You need integrations with LangChain, CrewAI, AutoGen, or Vercel AI SDK
-- You need enterprise compliance (SOC 2, HIPAA) handled for you
-- You value ecosystem maturity and community support
-- Your graph memory needs are complex enough to justify $249/mo
+Use this rule of thumb:
 
-**Choose MemBlock if:**
-- You need full data ownership with zero cloud dependencies
-- You want typed memory, knowledge graph, and decay without a $249/mo paywall
-- You need field-level encryption with your own keys at every tier
-- You need cryptographic tamper detection (not just audit logs)
-- You want a simple, deterministic SDK you can test and debug like any other library
-- You're building in Python and want minimal infrastructure (SQLite is enough to start)
-- You're cost-sensitive — one license, everything included
+**Choose MemBlock if your priority is:**
+- Own data ownership (no memory data sent to external providers by default)
+- Structured memory with typed blocks + built-in graph + decay in one package
+- Private deployment with SQLite/PostgreSQL on your own infrastructure
+- Low recurring cost and private distribution control
+- Deterministic, debuggable behavior under your own CI/security policies
+- Full control over encryption, retention, and schema evolution
+
+**Choose Mem0 if your priority is:**
+- Fast managed rollout with less backend operations burden
+- Broad language and orchestration ecosystem integration speed
+- Centralized cloud service model with external API-based scale
+- Team preference for API-first usage over local SDK ownership
+- Faster time-to-production for multi-stack teams
+
+**Decision matrix:**
+
+| Requirement | MemBlock | Mem0 |
+|---|---|---|
+| Data cannot leave your infra | **Strong fit** | Managed with external dependency |
+| Need private on-prem or VPC style deployments | **Strong fit** | Conditional |
+| Need a mature multi-language integration story | Possible (Python-first) | **Strong fit** |
+| Need local-first + source-level control | **Strong fit** | Limited |
+| Want minimal backend operational responsibility | Possible but you operate it | **Strong fit** |
+| Budget prefers one-time/proprietary licensing model | **Strong fit** | API usage cost model |
+
+**Quick rule:**  
+Use **MemBlock** when control and privacy are non-negotiable.  
+Use **Mem0** when managed operations and broad ecosystem plug-and-play matter more.
 
 ### The Honest Bottom Line
 
