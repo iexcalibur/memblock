@@ -7,6 +7,8 @@
 
 ---
 
+AI agents forget everything between sessions. Vector databases give you search but no structure. Cloud memory APIs lock you in and store your users' data on someone else's servers. MemBlock is the alternative: **typed memory blocks, a built-in knowledge graph, hybrid search, encryption, and intelligent decay** — all running on your infrastructure with `pip install` and one line of Python. No Docker, no Neo4j, no subscriptions. Your data never leaves your machine.
+
 ## Install
 
 ```bash

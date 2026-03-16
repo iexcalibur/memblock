@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.3
+
+### Changed
+- **Updated PyPI README**: Added positioning copy and feature summary for better discoverability on PyPI.
+- **Unified `llm` extra**: `pip install "memblock[llm]"` now includes OpenAI, Anthropic, and Gemini — no separate `llm-gemini` needed.
+
 ## v0.4.2
 
 ### Changed
