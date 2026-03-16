@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 # The latest schema version. Bump this when adding new migrations.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 @dataclass
@@ -158,6 +158,97 @@ MIGRATIONS: list[Migration] = [
             cur.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_mb_metadata_agent "
                 f"ON {schema}.memblock_metadata(user_id, agent_id)"
+            ),
+        ),
+    ),
+    Migration(
+        version=6,
+        description="Add org-level Q&A analytics tables",
+        up_sqlite=lambda cur: (
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS org_questions (
+                    id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    normalized_text TEXT NOT NULL,
+                    frequency_count INTEGER NOT NULL DEFAULT 1,
+                    unique_user_count INTEGER NOT NULL DEFAULT 1,
+                    first_asked TEXT NOT NULL,
+                    last_asked TEXT NOT NULL,
+                    UNIQUE(org_id, normalized_text)
+                )
+            """),
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS org_question_users (
+                    org_id TEXT NOT NULL,
+                    question_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    PRIMARY KEY (org_id, question_id, user_id),
+                    FOREIGN KEY (question_id) REFERENCES org_questions(id) ON DELETE CASCADE
+                )
+            """),
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS org_question_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    org_id TEXT NOT NULL,
+                    question_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    asked_at TEXT NOT NULL,
+                    FOREIGN KEY (question_id) REFERENCES org_questions(id) ON DELETE CASCADE
+                )
+            """),
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_org_questions_org ON org_questions(org_id)"
+            ),
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_org_questions_freq ON org_questions(org_id, frequency_count DESC)"
+            ),
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_org_question_events_time ON org_question_events(org_id, asked_at)"
+            ),
+        ),
+        up_postgres=lambda cur, schema: (
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {schema}.memblock_org_questions (
+                    id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    normalized_text TEXT NOT NULL,
+                    frequency_count INTEGER NOT NULL DEFAULT 1,
+                    unique_user_count INTEGER NOT NULL DEFAULT 1,
+                    first_asked TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_asked TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(org_id, normalized_text)
+                )
+            """),
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {schema}.memblock_org_question_users (
+                    org_id TEXT NOT NULL,
+                    question_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    PRIMARY KEY (org_id, question_id, user_id),
+                    FOREIGN KEY (question_id) REFERENCES {schema}.memblock_org_questions(id) ON DELETE CASCADE
+                )
+            """),
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {schema}.memblock_org_question_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    question_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    asked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    FOREIGN KEY (question_id) REFERENCES {schema}.memblock_org_questions(id) ON DELETE CASCADE
+                )
+            """),
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_mb_org_questions_org "
+                f"ON {schema}.memblock_org_questions(org_id)"
+            ),
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_mb_org_questions_freq "
+                f"ON {schema}.memblock_org_questions(org_id, frequency_count DESC)"
+            ),
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_mb_org_question_events_time "
+                f"ON {schema}.memblock_org_question_events(org_id, asked_at)"
             ),
         ),
     ),

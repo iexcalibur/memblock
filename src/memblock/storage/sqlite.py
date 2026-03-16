@@ -524,6 +524,231 @@ class SQLiteAdapter(StorageAdapter):
         cur.execute("DELETE FROM block_embeddings WHERE block_id = ?", (block_id,))
         self.conn.commit()
 
+    # ─── Analytics Operations ─────────────────────────────────────────────
+
+    def initialize_analytics_tables(self) -> None:
+        """Create analytics tables if they don't exist (for in-memory DBs that skip migrations)."""
+        cur = self.conn.cursor()
+        cur.executescript("""
+            CREATE TABLE IF NOT EXISTS org_questions (
+                id TEXT PRIMARY KEY,
+                org_id TEXT NOT NULL,
+                normalized_text TEXT NOT NULL,
+                frequency_count INTEGER NOT NULL DEFAULT 1,
+                unique_user_count INTEGER NOT NULL DEFAULT 1,
+                first_asked TEXT NOT NULL,
+                last_asked TEXT NOT NULL,
+                UNIQUE(org_id, normalized_text)
+            );
+
+            CREATE TABLE IF NOT EXISTS org_question_users (
+                org_id TEXT NOT NULL,
+                question_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                PRIMARY KEY (org_id, question_id, user_id),
+                FOREIGN KEY (question_id) REFERENCES org_questions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS org_question_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_id TEXT NOT NULL,
+                question_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                asked_at TEXT NOT NULL,
+                FOREIGN KEY (question_id) REFERENCES org_questions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_org_questions_org ON org_questions(org_id);
+            CREATE INDEX IF NOT EXISTS idx_org_questions_freq ON org_questions(org_id, frequency_count DESC);
+            CREATE INDEX IF NOT EXISTS idx_org_question_events_time ON org_question_events(org_id, asked_at);
+        """)
+        self.conn.commit()
+
+    def upsert_question(
+        self, org_id: str, normalized_text: str, user_id: str, asked_at: Any,
+    ) -> dict[str, Any]:
+        """Upsert a question and return the question record dict."""
+        import uuid as _uuid
+
+        cur = self.conn.cursor()
+        asked_at_str = asked_at.isoformat() if hasattr(asked_at, "isoformat") else str(asked_at)
+
+        # Try to find existing question
+        cur.execute(
+            "SELECT id, frequency_count FROM org_questions WHERE org_id = ? AND normalized_text = ?",
+            (org_id, normalized_text),
+        )
+        row = cur.fetchone()
+
+        if row:
+            question_id = row["id"]
+            # Increment frequency and update last_asked
+            cur.execute(
+                "UPDATE org_questions SET frequency_count = frequency_count + 1, last_asked = ? WHERE id = ?",
+                (asked_at_str, question_id),
+            )
+            # Insert user if new (ignore if already exists)
+            cur.execute(
+                "INSERT OR IGNORE INTO org_question_users (org_id, question_id, user_id) VALUES (?, ?, ?)",
+                (org_id, question_id, user_id),
+            )
+            # Update unique_user_count from the join table
+            cur.execute(
+                "UPDATE org_questions SET unique_user_count = "
+                "(SELECT COUNT(*) FROM org_question_users WHERE question_id = ?) WHERE id = ?",
+                (question_id, question_id),
+            )
+        else:
+            question_id = f"qa_{_uuid.uuid4().hex[:12]}"
+            cur.execute(
+                "INSERT INTO org_questions (id, org_id, normalized_text, frequency_count, unique_user_count, first_asked, last_asked) "
+                "VALUES (?, ?, ?, 1, 1, ?, ?)",
+                (question_id, org_id, normalized_text, asked_at_str, asked_at_str),
+            )
+            cur.execute(
+                "INSERT INTO org_question_users (org_id, question_id, user_id) VALUES (?, ?, ?)",
+                (org_id, question_id, user_id),
+            )
+
+        # Always log the event
+        cur.execute(
+            "INSERT INTO org_question_events (org_id, question_id, user_id, asked_at) VALUES (?, ?, ?, ?)",
+            (org_id, question_id, user_id, asked_at_str),
+        )
+        self.conn.commit()
+
+        # Return the updated record
+        cur.execute("SELECT * FROM org_questions WHERE id = ?", (question_id,))
+        q = cur.fetchone()
+        return {
+            "id": q["id"],
+            "org_id": q["org_id"],
+            "normalized_text": q["normalized_text"],
+            "frequency_count": q["frequency_count"],
+            "unique_user_count": q["unique_user_count"],
+            "first_asked": q["first_asked"],
+            "last_asked": q["last_asked"],
+        }
+
+    def get_top_questions(
+        self, org_id: str, limit: int = 20, since: Any = None, until: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Get top questions by frequency."""
+        cur = self.conn.cursor()
+
+        if since or until:
+            # Filter by events in time range, then aggregate
+            conditions = ["e.org_id = ?"]
+            params: list[Any] = [org_id]
+            if since:
+                conditions.append("e.asked_at >= ?")
+                params.append(since.isoformat() if hasattr(since, "isoformat") else str(since))
+            if until:
+                conditions.append("e.asked_at <= ?")
+                params.append(until.isoformat() if hasattr(until, "isoformat") else str(until))
+
+            where = " AND ".join(conditions)
+            cur.execute(
+                f"SELECT q.*, COUNT(e.id) as period_count "
+                f"FROM org_questions q "
+                f"INNER JOIN org_question_events e ON q.id = e.question_id "
+                f"WHERE {where} "
+                f"GROUP BY q.id "
+                f"ORDER BY period_count DESC LIMIT ?",
+                params + [limit],
+            )
+        else:
+            cur.execute(
+                "SELECT * FROM org_questions WHERE org_id = ? ORDER BY frequency_count DESC LIMIT ?",
+                (org_id, limit),
+            )
+
+        results = []
+        for row in cur.fetchall():
+            results.append({
+                "id": row["id"],
+                "org_id": row["org_id"],
+                "normalized_text": row["normalized_text"],
+                "frequency_count": row["frequency_count"],
+                "unique_user_count": row["unique_user_count"],
+                "first_asked": row["first_asked"],
+                "last_asked": row["last_asked"],
+            })
+        return results
+
+    def get_question_events(
+        self, org_id: str, question_id: str, since: Any = None, until: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Get individual question events for time breakdown."""
+        cur = self.conn.cursor()
+        conditions = ["org_id = ?", "question_id = ?"]
+        params: list[Any] = [org_id, question_id]
+
+        if since:
+            conditions.append("asked_at >= ?")
+            params.append(since.isoformat() if hasattr(since, "isoformat") else str(since))
+        if until:
+            conditions.append("asked_at <= ?")
+            params.append(until.isoformat() if hasattr(until, "isoformat") else str(until))
+
+        where = " AND ".join(conditions)
+        cur.execute(
+            f"SELECT * FROM org_question_events WHERE {where} ORDER BY asked_at ASC",
+            params,
+        )
+        return [
+            {
+                "id": row["id"],
+                "org_id": row["org_id"],
+                "question_id": row["question_id"],
+                "user_id": row["user_id"],
+                "asked_at": row["asked_at"],
+            }
+            for row in cur.fetchall()
+        ]
+
+    def get_question_by_text(
+        self, org_id: str, normalized_text: str,
+    ) -> dict[str, Any] | None:
+        """Lookup a question by its normalized text."""
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT * FROM org_questions WHERE org_id = ? AND normalized_text = ?",
+            (org_id, normalized_text),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "org_id": row["org_id"],
+            "normalized_text": row["normalized_text"],
+            "frequency_count": row["frequency_count"],
+            "unique_user_count": row["unique_user_count"],
+            "first_asked": row["first_asked"],
+            "last_asked": row["last_asked"],
+        }
+
+    def get_all_questions(self, org_id: str) -> list[dict[str, Any]]:
+        """Get all tracked questions for an org."""
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT * FROM org_questions WHERE org_id = ? ORDER BY frequency_count DESC",
+            (org_id,),
+        )
+        return [
+            {
+                "id": row["id"],
+                "org_id": row["org_id"],
+                "normalized_text": row["normalized_text"],
+                "frequency_count": row["frequency_count"],
+                "unique_user_count": row["unique_user_count"],
+                "first_asked": row["first_asked"],
+                "last_asked": row["last_asked"],
+            }
+            for row in cur.fetchall()
+        ]
+
     # ─── Lifecycle ────────────────────────────────────────────────────────
 
     def close(self) -> None:

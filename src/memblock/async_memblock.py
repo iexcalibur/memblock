@@ -232,6 +232,40 @@ class AsyncMemBlock:
         """Register a callback for a memory lifecycle event."""
         self._mem.on(event, callback)
 
+    # ─── Analytics ────────────────────────────────────────────────────────
+
+    async def log_question(
+        self, question: str, user_id: str | None = None, org_id: str | None = None,
+    ) -> Any:
+        """Log a user question for org-level analytics (async)."""
+        return await asyncio.to_thread(self._mem.log_question, question, user_id, org_id)
+
+    async def get_top_questions(
+        self, org_id: str | None = None, limit: int = 20, **kwargs: Any,
+    ) -> list:
+        """Get most frequently asked questions (async)."""
+        return await asyncio.to_thread(self._mem.get_top_questions, org_id, limit, **kwargs)
+
+    async def get_trending_questions(
+        self, org_id: str | None = None, window_days: int = 7, limit: int = 10,
+    ) -> list:
+        """Get questions trending upward in frequency (async)."""
+        return await asyncio.to_thread(
+            self._mem.get_trending_questions, org_id, window_days, limit,
+        )
+
+    async def get_question_breakdown(
+        self, question: str, org_id: str | None = None, granularity: str = "daily",
+    ) -> dict:
+        """Get daily/weekly/monthly frequency breakdown for a question (async)."""
+        return await asyncio.to_thread(
+            self._mem.get_question_breakdown, question, org_id, granularity,
+        )
+
+    async def question_stats(self, org_id: str | None = None) -> dict:
+        """Get summary analytics stats for an org (async)."""
+        return await asyncio.to_thread(self._mem.question_stats, org_id)
+
     # ─── Properties ───────────────────────────────────────────────────────
 
     @property

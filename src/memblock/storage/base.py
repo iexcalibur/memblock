@@ -147,6 +147,40 @@ class StorageAdapter(ABC):
         """Get a block by content hash. Override in subclass for dedup support."""
         return None
 
+    # ─── Analytics Operations ─────────────────────────────────────────────
+
+    def initialize_analytics_tables(self) -> None:
+        """Create analytics tables if they don't exist. Override in subclass."""
+        pass
+
+    def upsert_question(
+        self, org_id: str, normalized_text: str, user_id: str, asked_at: "Any",
+    ) -> dict[str, "Any"]:
+        """Upsert a question and return the question record dict. Override in subclass."""
+        return {}
+
+    def get_top_questions(
+        self, org_id: str, limit: int = 20, since: "Any" = None, until: "Any" = None,
+    ) -> list[dict[str, "Any"]]:
+        """Get top questions by frequency. Override in subclass."""
+        return []
+
+    def get_question_events(
+        self, org_id: str, question_id: str, since: "Any" = None, until: "Any" = None,
+    ) -> list[dict[str, "Any"]]:
+        """Get individual question events for time breakdown. Override in subclass."""
+        return []
+
+    def get_question_by_text(
+        self, org_id: str, normalized_text: str,
+    ) -> dict[str, "Any"] | None:
+        """Lookup a question by its normalized text. Override in subclass."""
+        return None
+
+    def get_all_questions(self, org_id: str) -> list[dict[str, "Any"]]:
+        """Get all tracked questions for an org. Override in subclass."""
+        return []
+
     # ─── Lifecycle ────────────────────────────────────────────────────────
 
     @abstractmethod

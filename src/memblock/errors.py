@@ -51,3 +51,8 @@ class LicenseError(MemBlockError):
 class ConflictResolutionError(MemBlockError):
     """Raised when LLM-based conflict resolution fails."""
     pass
+
+
+class AnalyticsError(MemBlockError):
+    """Raised when analytics operations fail or analytics is not enabled."""
+    pass

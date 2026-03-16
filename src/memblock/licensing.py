@@ -33,6 +33,7 @@ class LicenseInfo:
     customer: str
     issued_at: date
     expires_at: date | None  # None = perpetual
+    tier: str = "community"  # "community" or "pro"
 
 
 # ─── Key Generation ───────────────────────────────────────────────────────
@@ -40,7 +41,8 @@ class LicenseInfo:
 
 def _sign(payload: dict, secret: str) -> str:
     """Compute HMAC-SHA256 signature over the canonical payload fields."""
-    msg = f"{payload['id']}|{payload['customer']}|{payload['issued_at']}|{payload['expires_at']}"
+    tier = payload.get("tier", "community")
+    msg = f"{payload['id']}|{payload['customer']}|{payload['issued_at']}|{payload['expires_at']}|{tier}"
     return hmac.new(
         secret.encode("utf-8"),
         msg.encode("utf-8"),
@@ -52,6 +54,7 @@ def generate_license(
     customer: str,
     secret: str,
     expires_days: int | None = 365,
+    tier: str = "community",
 ) -> str:
     """
     Generate a signed license key.
@@ -60,6 +63,7 @@ def generate_license(
         customer: Customer name / company.
         secret: The HMAC shared secret.
         expires_days: Days until expiry (None = perpetual).
+        tier: License tier — "community" (free) or "pro" (paid).
 
     Returns:
         Base64-encoded license key string.
@@ -81,6 +85,7 @@ def generate_license(
         "customer": customer,
         "issued_at": today.isoformat(),
         "expires_at": expires_at,
+        "tier": tier,
     }
 
     payload["signature"] = _sign(payload, secret)
@@ -151,6 +156,7 @@ def validate_license(key_str: str, secret: str) -> LicenseInfo:
         customer=payload["customer"],
         issued_at=issued_at,
         expires_at=expires_at,
+        tier=payload.get("tier", "community"),
     )
 
 

@@ -13,14 +13,16 @@ Usage:
     mem.verify()  # check tamper detection
 """
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"
 
 from memblock.block import Block
 from memblock.context import ContextBuilder
 from memblock.crypto import CryptoLayer, CryptoLayerWithPassphrase
 from memblock.decay import DecayEngine
 from memblock.dedup import DuplicatePolicy
+from memblock.analytics import OrgAnalytics, QuestionRecord, NoiseFilter
 from memblock.errors import (
+    AnalyticsError,
     BlockNotFoundError,
     ConflictResolutionError,
     DuplicateBlockError,
@@ -55,8 +57,12 @@ from memblock.memblock import MemBlock
 from memblock.async_memblock import AsyncMemBlock
 
 __all__ = [
+    "AnalyticsError",
     "AsyncMemBlock",
     "MemBlock",
+    "NoiseFilter",
+    "OrgAnalytics",
+    "QuestionRecord",
     "Block",
     "BlockMetadata",
     "BlockNotFoundError",

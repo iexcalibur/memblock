@@ -10,7 +10,7 @@ from memblock.context import ContextBuilder
 from memblock.crypto import CryptoLayerWithPassphrase
 from memblock.decay import DecayEngine
 from memblock.dedup import ContentHasher, DuplicateChecker, DuplicatePolicy
-from memblock.errors import DuplicateBlockError, EncryptionError, ExtractionError, LicenseError
+from memblock.errors import AnalyticsError, DuplicateBlockError, EncryptionError, ExtractionError, LicenseError
 from memblock.hooks import EventType, HookManager
 from memblock.licensing import LicenseInfo, get_secret, get_stored_license, validate_license
 from memblock.graph import GraphIndex
@@ -90,6 +90,8 @@ class MemBlock:
         reranker: Any = None,
         auto_extract_on_store: bool = False,
         conflict_resolution: bool = False,
+        enable_analytics: bool = False,
+        analytics_noise_words: set[str] | None = None,
     ) -> None:
         """
         Initialize MemBlock.
@@ -141,6 +143,10 @@ class MemBlock:
                 are configured, store() will first check for semantically
                 similar existing blocks and use the LLM to decide whether
                 to ADD, UPDATE, DELETE, or skip. Requires embeddings=True.
+            enable_analytics: Enable org-level Q&A analytics (default False).
+                When True, exposes log_question(), get_top_questions(), etc.
+            analytics_noise_words: Additional noise words to filter from analytics
+                (e.g. greetings, filler). Merged with built-in defaults.
         """
         # ── License validation (disabled — re-enable for paid tier) ──
         # secret = get_secret()
@@ -214,6 +220,11 @@ class MemBlock:
         self._conflict_resolution = conflict_resolution
         self._conflict_resolver = None  # Lazy-initialized
         self._extracting = False  # Prevents infinite recursion
+
+        # Analytics (opt-in)
+        self._enable_analytics = enable_analytics
+        self._analytics_noise_words = analytics_noise_words
+        self._analytics = None  # Lazy-initialized
 
     @staticmethod
     def _create_storage(uri: str, user_id: str = "default") -> StorageAdapter:
@@ -971,6 +982,93 @@ class MemBlock:
             lines.append("")
 
         return "\n".join(lines)
+
+    # ─── Analytics ────────────────────────────────────────────────────────
+
+    def _get_analytics(self) -> Any:
+        """Lazily initialize the OrgAnalytics engine."""
+        if self._analytics is not None:
+            return self._analytics
+
+        from memblock.analytics import OrgAnalytics, NoiseFilter
+
+        noise = NoiseFilter(custom_noise=self._analytics_noise_words)
+        self._storage.initialize_analytics_tables()
+        self._analytics = OrgAnalytics(self._storage, noise_filter=noise)
+        return self._analytics
+
+    def log_question(
+        self,
+        question: str,
+        user_id: str | None = None,
+        org_id: str | None = None,
+    ) -> Any:
+        """Log a user question for org-level analytics.
+
+        Requires enable_analytics=True. Returns QuestionRecord or None (if noise-filtered).
+        """
+        if not self._enable_analytics:
+            raise AnalyticsError("Analytics not enabled. Pass enable_analytics=True to MemBlock().")
+        return self._get_analytics().log_question(
+            org_id=org_id or self._org_id or "default",
+            user_id=user_id or self._user_id,
+            question=question,
+        )
+
+    def get_top_questions(
+        self,
+        org_id: str | None = None,
+        limit: int = 20,
+        since: Any = None,
+        until: Any = None,
+    ) -> list:
+        """Get most frequently asked questions at the org level."""
+        if not self._enable_analytics:
+            raise AnalyticsError("Analytics not enabled. Pass enable_analytics=True to MemBlock().")
+        return self._get_analytics().get_top_questions(
+            org_id=org_id or self._org_id or "default",
+            limit=limit,
+            since=since,
+            until=until,
+        )
+
+    def get_trending_questions(
+        self,
+        org_id: str | None = None,
+        window_days: int = 7,
+        limit: int = 10,
+    ) -> list:
+        """Get questions trending upward in frequency."""
+        if not self._enable_analytics:
+            raise AnalyticsError("Analytics not enabled. Pass enable_analytics=True to MemBlock().")
+        return self._get_analytics().get_trending(
+            org_id=org_id or self._org_id or "default",
+            window_days=window_days,
+            limit=limit,
+        )
+
+    def get_question_breakdown(
+        self,
+        question: str,
+        org_id: str | None = None,
+        granularity: str = "daily",
+    ) -> dict:
+        """Get daily/weekly/monthly frequency breakdown for a question."""
+        if not self._enable_analytics:
+            raise AnalyticsError("Analytics not enabled. Pass enable_analytics=True to MemBlock().")
+        return self._get_analytics().get_question_breakdown(
+            org_id=org_id or self._org_id or "default",
+            question_text=question,
+            granularity=granularity,
+        )
+
+    def question_stats(self, org_id: str | None = None) -> dict:
+        """Get summary analytics stats for an org."""
+        if not self._enable_analytics:
+            raise AnalyticsError("Analytics not enabled. Pass enable_analytics=True to MemBlock().")
+        return self._get_analytics().question_stats(
+            org_id=org_id or self._org_id or "default",
+        )
 
     # ─── Stats ────────────────────────────────────────────────────────────
 

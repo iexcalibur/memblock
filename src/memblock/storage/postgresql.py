@@ -659,6 +659,241 @@ class PostgreSQLAdapter(StorageAdapter):
             """, (block_id, self.user_id))
         self.conn.commit()
 
+    # ─── Analytics Operations ─────────────────────────────────────────────
+
+    def initialize_analytics_tables(self) -> None:
+        """Create analytics tables if they don't exist."""
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.schema}.memblock_org_questions (
+                    id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    normalized_text TEXT NOT NULL,
+                    frequency_count INTEGER NOT NULL DEFAULT 1,
+                    unique_user_count INTEGER NOT NULL DEFAULT 1,
+                    first_asked TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_asked TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(org_id, normalized_text)
+                )
+            """)
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.schema}.memblock_org_question_users (
+                    org_id TEXT NOT NULL,
+                    question_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    PRIMARY KEY (org_id, question_id, user_id),
+                    FOREIGN KEY (question_id)
+                        REFERENCES {self.schema}.memblock_org_questions(id) ON DELETE CASCADE
+                )
+            """)
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.schema}.memblock_org_question_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    question_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    asked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    FOREIGN KEY (question_id)
+                        REFERENCES {self.schema}.memblock_org_questions(id) ON DELETE CASCADE
+                )
+            """)
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_mb_org_questions_org "
+                f"ON {self.schema}.memblock_org_questions(org_id)"
+            )
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_mb_org_questions_freq "
+                f"ON {self.schema}.memblock_org_questions(org_id, frequency_count DESC)"
+            )
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_mb_org_question_events_time "
+                f"ON {self.schema}.memblock_org_question_events(org_id, asked_at)"
+            )
+        self.conn.commit()
+
+    def upsert_question(
+        self, org_id: str, normalized_text: str, user_id: str, asked_at: Any,
+    ) -> dict[str, Any]:
+        """Upsert a question and return the question record dict."""
+        import uuid as _uuid
+
+        asked_at_val = asked_at.isoformat() if hasattr(asked_at, "isoformat") else str(asked_at)
+
+        with self.conn.cursor() as cur:
+            # Upsert the question
+            question_id = f"qa_{_uuid.uuid4().hex[:12]}"
+            cur.execute(f"""
+                INSERT INTO {self.schema}.memblock_org_questions
+                    (id, org_id, normalized_text, frequency_count, unique_user_count, first_asked, last_asked)
+                VALUES (%s, %s, %s, 1, 1, %s, %s)
+                ON CONFLICT (org_id, normalized_text) DO UPDATE SET
+                    frequency_count = {self.schema}.memblock_org_questions.frequency_count + 1,
+                    last_asked = EXCLUDED.last_asked
+                RETURNING id
+            """, (question_id, org_id, normalized_text, asked_at_val, asked_at_val))
+            question_id = cur.fetchone()["id"]
+
+            # Insert user if new
+            cur.execute(f"""
+                INSERT INTO {self.schema}.memblock_org_question_users (org_id, question_id, user_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (org_id, question_id, user_id))
+
+            # Update unique_user_count
+            cur.execute(f"""
+                UPDATE {self.schema}.memblock_org_questions
+                SET unique_user_count = (
+                    SELECT COUNT(*) FROM {self.schema}.memblock_org_question_users
+                    WHERE question_id = %s
+                )
+                WHERE id = %s
+            """, (question_id, question_id))
+
+            # Log the event
+            cur.execute(f"""
+                INSERT INTO {self.schema}.memblock_org_question_events
+                    (org_id, question_id, user_id, asked_at)
+                VALUES (%s, %s, %s, %s)
+            """, (org_id, question_id, user_id, asked_at_val))
+
+            # Return the record
+            cur.execute(f"""
+                SELECT * FROM {self.schema}.memblock_org_questions WHERE id = %s
+            """, (question_id,))
+            q = cur.fetchone()
+
+        self.conn.commit()
+        return {
+            "id": q["id"],
+            "org_id": q["org_id"],
+            "normalized_text": q["normalized_text"],
+            "frequency_count": q["frequency_count"],
+            "unique_user_count": q["unique_user_count"],
+            "first_asked": q["first_asked"].isoformat() if hasattr(q["first_asked"], "isoformat") else q["first_asked"],
+            "last_asked": q["last_asked"].isoformat() if hasattr(q["last_asked"], "isoformat") else q["last_asked"],
+        }
+
+    def get_top_questions(
+        self, org_id: str, limit: int = 20, since: Any = None, until: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Get top questions by frequency."""
+        with self.conn.cursor() as cur:
+            if since or until:
+                conditions = ["e.org_id = %s"]
+                params: list[Any] = [org_id]
+                if since:
+                    conditions.append("e.asked_at >= %s")
+                    params.append(since.isoformat() if hasattr(since, "isoformat") else str(since))
+                if until:
+                    conditions.append("e.asked_at <= %s")
+                    params.append(until.isoformat() if hasattr(until, "isoformat") else str(until))
+                where = " AND ".join(conditions)
+                cur.execute(f"""
+                    SELECT q.*, COUNT(e.id) as period_count
+                    FROM {self.schema}.memblock_org_questions q
+                    INNER JOIN {self.schema}.memblock_org_question_events e ON q.id = e.question_id
+                    WHERE {where}
+                    GROUP BY q.id
+                    ORDER BY period_count DESC LIMIT %s
+                """, params + [limit])
+            else:
+                cur.execute(f"""
+                    SELECT * FROM {self.schema}.memblock_org_questions
+                    WHERE org_id = %s ORDER BY frequency_count DESC LIMIT %s
+                """, (org_id, limit))
+            rows = cur.fetchall()
+
+        return [
+            {
+                "id": r["id"],
+                "org_id": r["org_id"],
+                "normalized_text": r["normalized_text"],
+                "frequency_count": r["frequency_count"],
+                "unique_user_count": r["unique_user_count"],
+                "first_asked": r["first_asked"].isoformat() if hasattr(r["first_asked"], "isoformat") else r["first_asked"],
+                "last_asked": r["last_asked"].isoformat() if hasattr(r["last_asked"], "isoformat") else r["last_asked"],
+            }
+            for r in rows
+        ]
+
+    def get_question_events(
+        self, org_id: str, question_id: str, since: Any = None, until: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Get individual question events for time breakdown."""
+        conditions = ["org_id = %s", "question_id = %s"]
+        params: list[Any] = [org_id, question_id]
+        if since:
+            conditions.append("asked_at >= %s")
+            params.append(since.isoformat() if hasattr(since, "isoformat") else str(since))
+        if until:
+            conditions.append("asked_at <= %s")
+            params.append(until.isoformat() if hasattr(until, "isoformat") else str(until))
+        where = " AND ".join(conditions)
+
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT * FROM {self.schema}.memblock_org_question_events
+                WHERE {where} ORDER BY asked_at ASC
+            """, params)
+            rows = cur.fetchall()
+
+        return [
+            {
+                "id": r["id"],
+                "org_id": r["org_id"],
+                "question_id": r["question_id"],
+                "user_id": r["user_id"],
+                "asked_at": r["asked_at"].isoformat() if hasattr(r["asked_at"], "isoformat") else r["asked_at"],
+            }
+            for r in rows
+        ]
+
+    def get_question_by_text(
+        self, org_id: str, normalized_text: str,
+    ) -> dict[str, Any] | None:
+        """Lookup a question by its normalized text."""
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT * FROM {self.schema}.memblock_org_questions
+                WHERE org_id = %s AND normalized_text = %s
+            """, (org_id, normalized_text))
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "org_id": row["org_id"],
+            "normalized_text": row["normalized_text"],
+            "frequency_count": row["frequency_count"],
+            "unique_user_count": row["unique_user_count"],
+            "first_asked": row["first_asked"].isoformat() if hasattr(row["first_asked"], "isoformat") else row["first_asked"],
+            "last_asked": row["last_asked"].isoformat() if hasattr(row["last_asked"], "isoformat") else row["last_asked"],
+        }
+
+    def get_all_questions(self, org_id: str) -> list[dict[str, Any]]:
+        """Get all tracked questions for an org."""
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT * FROM {self.schema}.memblock_org_questions
+                WHERE org_id = %s ORDER BY frequency_count DESC
+            """, (org_id,))
+            rows = cur.fetchall()
+
+        return [
+            {
+                "id": r["id"],
+                "org_id": r["org_id"],
+                "normalized_text": r["normalized_text"],
+                "frequency_count": r["frequency_count"],
+                "unique_user_count": r["unique_user_count"],
+                "first_asked": r["first_asked"].isoformat() if hasattr(r["first_asked"], "isoformat") else r["first_asked"],
+                "last_asked": r["last_asked"].isoformat() if hasattr(r["last_asked"], "isoformat") else r["last_asked"],
+            }
+            for r in rows
+        ]
+
     # ─── Lifecycle ────────────────────────────────────────────────────────
 
     def close(self) -> None:
