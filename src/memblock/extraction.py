@@ -4,6 +4,7 @@ LLM-powered auto-extraction — extract structured memory blocks from conversati
 Supports multiple LLM providers:
 - OpenAI (GPT-4, GPT-3.5, etc.)
 - Anthropic (Claude)
+- Google Gemini (Gemini 2.0 Flash, etc.)
 - Custom providers via callable
 
 Usage:
@@ -175,6 +176,49 @@ class AnthropicProvider(LLMProvider):
             temperature=self._temperature,
         )
         return response.content[0].text
+
+
+# ─── Gemini Provider ────────────────────────────────────────────────────────
+
+
+class GeminiProvider(LLMProvider):
+    """Google Gemini provider (Gemini 2.0 Flash, etc.)."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gemini-2.0-flash",
+        temperature: float = 0.1,
+    ) -> None:
+        try:
+            from google import genai
+        except ImportError:
+            raise ImportError(
+                "Gemini provider requires the google-genai package. "
+                "Install with: pip install memblock[llm-gemini]"
+            )
+
+        self._client = genai.Client(api_key=api_key)
+        self._model = model
+        self._temperature = temperature
+
+    @property
+    def name(self) -> str:
+        return f"gemini/{self._model}"
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        from google.genai import types
+
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=self._temperature,
+                response_mime_type="application/json",
+            ),
+        )
+        return response.text or "[]"
 
 
 # ─── Custom Provider ─────────────────────────────────────────────────────────

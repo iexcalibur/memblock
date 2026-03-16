@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.4.2
+
+### Changed
+- **Slim README for PyPI**: Reduced README to essentials with redirect to [memblock.xyz](https://memblock.xyz) for full documentation.
+- **Full docs moved to `docs/FULL_DOCS.md`**: Detailed documentation preserved in repo but excluded from published package.
+- **Updated project URLs**: Homepage and documentation now point to memblock.xyz.
+- **Published to PyPI**: `pip install memblock` now works directly.
+
+## v0.4.1
+
+### Added
+- **Gemini LLM Provider**: Google Gemini support for auto-extraction and conflict resolution (`extract_provider="gemini"`). Uses `google-genai` SDK with `gemini-2.0-flash` as default model.
+- **`llm-gemini` install extra**: `pip install "memblock[llm-gemini]"` for Gemini-powered extraction.
+
 ## v0.2.0
 
 ### Added

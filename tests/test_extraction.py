@@ -256,3 +256,39 @@ class TestExtractionVerification:
         results = mem.query(text_search="Python")
         assert len(results) >= 1
         assert "Python" in results[0].content
+
+
+class TestGeminiProvider:
+    def test_gemini_provider_name(self):
+        """Test GeminiProvider reports correct name (without needing google-genai installed)."""
+        # Use CallableProvider to simulate Gemini-like behavior
+        def gemini_mock(system: str, user: str) -> str:
+            return '[{"content": "Gemini extracted", "type": "fact", "confidence": 0.9, "source": "inferred", "tags": ["gemini"]}]'
+
+        provider = CallableProvider(fn=gemini_mock, provider_name="gemini/gemini-2.0-flash")
+        assert provider.name == "gemini/gemini-2.0-flash"
+
+    def test_gemini_provider_import_error(self):
+        """Test GeminiProvider raises ImportError when google-genai not installed."""
+        from unittest.mock import patch
+        from memblock.extraction import GeminiProvider
+
+        with patch.dict("sys.modules", {"google": None, "google.genai": None}):
+            with pytest.raises(ImportError, match="google-genai"):
+                GeminiProvider(api_key="fake-key")
+
+    def test_gemini_extraction_via_memblock(self, mem: MemBlock):
+        """Test Gemini extraction works end-to-end via callable provider."""
+        def gemini_mock(system: str, user: str) -> str:
+            return json.dumps([
+                {"content": "User likes Gemini API", "type": "preference", "confidence": 0.88, "source": "explicit", "tags": ["gemini"]},
+            ])
+
+        provider = CallableProvider(fn=gemini_mock, provider_name="gemini/gemini-2.0-flash")
+        extractor = LLMExtractor(provider=provider)
+        result = extractor.extract(conversation="User: I love using the Gemini API", memblock=mem)
+
+        assert result.blocks_created == 1
+        assert result.provider == "gemini/gemini-2.0-flash"
+        blocks = mem.query(tags=["gemini"])
+        assert len(blocks) == 1

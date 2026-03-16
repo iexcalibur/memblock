@@ -117,7 +117,7 @@ class MemBlock:
                 - "merge": merge tags/confidence, return updated block
             similarity_threshold: Cosine similarity threshold for semantic dedup (0.0-1.0).
             auto_extract: Enable opt-in auto-extraction from buffered messages.
-            extract_provider: LLM provider for extraction ("openai", "anthropic").
+            extract_provider: LLM provider for extraction ("openai", "anthropic", "gemini").
             extract_api_key: API key for extraction provider.
             extract_model: Model name override for extraction.
             extract_every: Trigger extraction every N messages (default 100).
@@ -842,6 +842,7 @@ class MemBlock:
             LLMExtractor,
             OpenAIProvider,
             AnthropicProvider,
+            GeminiProvider,
             CallableProvider,
         )
 
@@ -852,7 +853,7 @@ class MemBlock:
         if provider is None:
             raise ExtractionError(
                 "extract_provider is required when auto_extract=True. "
-                "Use 'openai' or 'anthropic'."
+                "Use 'openai', 'anthropic', or 'gemini'."
             )
 
         if callable(provider):
@@ -865,6 +866,10 @@ class MemBlock:
             if not api_key:
                 raise ExtractionError("extract_api_key is required for Anthropic extraction")
             llm_provider = AnthropicProvider(api_key=api_key, model=model or "claude-sonnet-4-20250514")
+        elif provider == "gemini":
+            if not api_key:
+                raise ExtractionError("extract_api_key is required for Gemini extraction")
+            llm_provider = GeminiProvider(api_key=api_key, model=model or "gemini-2.0-flash")
         else:
             raise ExtractionError(f"Unknown extract_provider: {provider}")
 
