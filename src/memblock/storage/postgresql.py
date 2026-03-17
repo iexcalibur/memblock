@@ -27,6 +27,20 @@ try:
 except ImportError:
     HAS_PSYCOPG = False
 
+try:
+    from psycopg_pool import ConnectionPool as PsycopgPool
+
+    HAS_PSYCOPG_POOL = True
+except ImportError:
+    HAS_PSYCOPG_POOL = False
+
+try:
+    from pgvector.psycopg import register_vector
+
+    HAS_PGVECTOR = True
+except ImportError:
+    HAS_PGVECTOR = False
+
 
 class PostgreSQLAdapter(StorageAdapter):
     """
@@ -54,6 +68,7 @@ class PostgreSQLAdapter(StorageAdapter):
         dsn: str,
         user_id: str = "default",
         schema: str = "public",
+        pool: Any = None,
     ) -> None:
         if not HAS_PSYCOPG:
             raise ImportError(
@@ -64,7 +79,11 @@ class PostgreSQLAdapter(StorageAdapter):
         self.dsn = dsn
         self.user_id = user_id
         self.schema = schema
+        self._pool = pool
+        self._pool_conn = False
         self._conn: psycopg.Connection | None = None
+        self._has_pgvector: bool = False
+        self._embedding_dims: int | None = None
 
     @property
     def adapter_type(self) -> str:
@@ -73,7 +92,14 @@ class PostgreSQLAdapter(StorageAdapter):
     @property
     def conn(self) -> psycopg.Connection:
         if self._conn is None or self._conn.closed:
-            self._conn = psycopg.connect(self.dsn, row_factory=dict_row, autocommit=False)
+            if self._pool is not None:
+                self._conn = self._pool.getconn()
+                self._conn.row_factory = dict_row
+                self._conn.autocommit = False
+                self._pool_conn = True
+            else:
+                self._conn = psycopg.connect(self.dsn, row_factory=dict_row, autocommit=False)
+                self._pool_conn = False
         return self._conn
 
     def initialize(self) -> None:
@@ -216,7 +242,7 @@ class PostgreSQLAdapter(StorageAdapter):
                 $$
             """)
 
-            # Embeddings table for vector search
+            # Embeddings table for vector search (BYTEA fallback)
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.schema}.memblock_embeddings (
                     block_id TEXT NOT NULL,
@@ -227,6 +253,26 @@ class PostgreSQLAdapter(StorageAdapter):
                         REFERENCES {self.schema}.memblock_blocks(id, user_id) ON DELETE CASCADE
                 )
             """)
+
+            # pgvector: create vector-typed embeddings table if extension available
+            if HAS_PGVECTOR:
+                cur.execute(
+                    "SELECT 1 FROM pg_extension WHERE extname = 'vector'"
+                )
+                if cur.fetchone():
+                    self._has_pgvector = True
+                    register_vector(self.conn)
+                    cur.execute(f"""
+                        CREATE TABLE IF NOT EXISTS {self.schema}.memblock_embeddings_vec (
+                            block_id TEXT NOT NULL,
+                            user_id TEXT NOT NULL,
+                            embedding vector NOT NULL,
+                            PRIMARY KEY (block_id, user_id),
+                            FOREIGN KEY (block_id, user_id)
+                                REFERENCES {self.schema}.memblock_blocks(id, user_id)
+                                ON DELETE CASCADE
+                        )
+                    """)
 
         self.conn.commit()
 
@@ -621,7 +667,21 @@ class PostgreSQLAdapter(StorageAdapter):
 
     # ─── Embedding Operations ────────────────────────────────────────────
 
+    def _ensure_pgvector_index(self, dims: int) -> None:
+        """Create HNSW index on pgvector table once dimensions are known."""
+        if self._embedding_dims is not None:
+            return
+        self._embedding_dims = dims
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_mb_embeddings_vec_hnsw
+                ON {self.schema}.memblock_embeddings_vec
+                USING hnsw (embedding vector_cosine_ops)
+            """)
+        self.conn.commit()
+
     def save_embedding(self, block_id: str, embedding: bytes) -> None:
+        # Always write to BYTEA table (backward compat)
         with self.conn.cursor() as cur:
             cur.execute(f"""
                 INSERT INTO {self.schema}.memblock_embeddings (block_id, user_id, embedding)
@@ -629,6 +689,21 @@ class PostgreSQLAdapter(StorageAdapter):
                 ON CONFLICT (block_id, user_id) DO UPDATE SET embedding = EXCLUDED.embedding
             """, (block_id, self.user_id, embedding))
         self.conn.commit()
+
+        # Dual-write to pgvector table if available
+        if self._has_pgvector:
+            from memblock.embeddings import unpack_embedding
+            vec = unpack_embedding(embedding)
+            self._ensure_pgvector_index(len(vec))
+            with self.conn.cursor() as cur:
+                cur.execute(f"""
+                    INSERT INTO {self.schema}.memblock_embeddings_vec
+                        (block_id, user_id, embedding)
+                    VALUES (%s, %s, %s::vector)
+                    ON CONFLICT (block_id, user_id)
+                    DO UPDATE SET embedding = EXCLUDED.embedding
+                """, (block_id, self.user_id, str(vec)))
+            self.conn.commit()
 
     def get_embedding(self, block_id: str) -> bytes | None:
         with self.conn.cursor() as cur:
@@ -657,7 +732,42 @@ class PostgreSQLAdapter(StorageAdapter):
                 DELETE FROM {self.schema}.memblock_embeddings
                 WHERE block_id = %s AND user_id = %s
             """, (block_id, self.user_id))
+            if self._has_pgvector:
+                cur.execute(f"""
+                    DELETE FROM {self.schema}.memblock_embeddings_vec
+                    WHERE block_id = %s AND user_id = %s
+                """, (block_id, self.user_id))
         self.conn.commit()
+
+    def search_similar_embeddings(
+        self, query_embedding: bytes, limit: int = 20,
+    ) -> list[tuple[str, float]]:
+        """
+        Server-side cosine similarity search using pgvector.
+
+        Returns list of (block_id, similarity_score) sorted by similarity desc.
+        Returns empty list if pgvector is not available.
+        """
+        if not self._has_pgvector:
+            return []
+
+        from memblock.embeddings import unpack_embedding
+        query_vec = unpack_embedding(query_embedding)
+        vec_str = str(query_vec)
+
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT e.block_id, 1 - (e.embedding <=> %s::vector) AS similarity
+                FROM {self.schema}.memblock_embeddings_vec e
+                INNER JOIN {self.schema}.memblock_blocks b
+                    ON e.block_id = b.id AND e.user_id = b.user_id
+                WHERE e.user_id = %s AND b.deleted = FALSE
+                ORDER BY e.embedding <=> %s::vector
+                LIMIT %s
+            """, (vec_str, self.user_id, vec_str, limit))
+            rows = cur.fetchall()
+
+        return [(row["block_id"], float(row["similarity"])) for row in rows]
 
     # ─── Analytics Operations ─────────────────────────────────────────────
 
@@ -898,8 +1008,12 @@ class PostgreSQLAdapter(StorageAdapter):
 
     def close(self) -> None:
         if self._conn and not self._conn.closed:
-            self._conn.close()
+            if self._pool_conn and self._pool is not None:
+                self._pool.putconn(self._conn)
+            else:
+                self._conn.close()
             self._conn = None
+            self._pool_conn = False
 
     # ─── Internal Helpers ─────────────────────────────────────────────────
 

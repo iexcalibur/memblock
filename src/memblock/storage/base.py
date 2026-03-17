@@ -141,6 +141,17 @@ class StorageAdapter(ABC):
         """Delete the embedding for a block. Override in subclass."""
         pass
 
+    def search_similar_embeddings(
+        self, query_embedding: bytes, limit: int = 20,
+    ) -> list[tuple[str, float]]:
+        """
+        Server-side similarity search. Returns [(block_id, score), ...].
+
+        Override in subclass for database-native vector search (e.g. pgvector).
+        Returns empty list if not supported (fallback to Python cosine).
+        """
+        return []
+
     # ─── Deduplication ────────────────────────────────────────────────────
 
     def get_block_by_content_hash(self, content_hash: str) -> Block | None:

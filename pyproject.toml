@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memblock"
-version = "0.5.0"
+version = "0.6.0"
 description = "Typed block tree + knowledge graph memory SDK for AI agents"
 readme = "README.md"
 license = {text = "Proprietary"}
@@ -35,6 +35,8 @@ Repository = "https://github.com/iexcalibur/memblock"
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
+pool = ["psycopg_pool>=3.1"]
+pgvector = ["pgvector>=0.3"]
 tokens = ["tiktoken>=0.5"]
 llm = [
     "openai>=1.0",
@@ -49,6 +51,8 @@ reranker-cohere = ["httpx>=0.24"]
 reranker-cross-encoder = ["sentence-transformers>=2.0"]
 all = [
     "memblock[postgres]",
+    "memblock[pool]",
+    "memblock[pgvector]",
     "memblock[tokens]",
     "memblock[llm]",
     "memblock[embeddings]",

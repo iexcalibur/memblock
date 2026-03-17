@@ -202,26 +202,34 @@ class QueryEngine:
                 return {}
             query_vec = query_embeddings[0]
 
-            # Get all stored embeddings
+            # FTS ranked list
+            fts_ids = [b.id for b in fts_candidates[:limit]]
+
+            # Try server-side vector search first (pgvector)
+            from memblock.embeddings import pack_embedding
+            query_bytes = pack_embedding(query_vec)
+            server_results = self.storage.search_similar_embeddings(
+                query_bytes, limit
+            )
+            if server_results:
+                vec_ids = [bid for bid, _ in server_results]
+                merged = rrf_merge(fts_ids, vec_ids)
+                return dict(merged)
+
+            # Fallback: brute-force cosine similarity in Python
             all_embeddings = self.storage.get_all_embeddings()
             if not all_embeddings:
                 return {}
 
-            # Score each block by cosine similarity
             vec_scored: list[tuple[str, float]] = []
             for block_id, emb_bytes in all_embeddings:
                 emb = unpack_embedding(emb_bytes)
                 score = cosine_similarity(query_vec, emb)
                 vec_scored.append((block_id, score))
 
-            # Sort by similarity (descending)
             vec_scored.sort(key=lambda x: x[1], reverse=True)
             vec_ids = [bid for bid, _ in vec_scored[:limit]]
 
-            # FTS ranked list
-            fts_ids = [b.id for b in fts_candidates[:limit]]
-
-            # RRF merge
             merged = rrf_merge(fts_ids, vec_ids)
             return dict(merged)
 

@@ -13,7 +13,7 @@ Usage:
     mem.verify()  # check tamper detection
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 from memblock.block import Block
 from memblock.context import ContextBuilder
@@ -55,11 +55,14 @@ from memblock.types import (
 
 from memblock.memblock import MemBlock
 from memblock.async_memblock import AsyncMemBlock
+from memblock.pool import AsyncMemBlockPool, MemBlockPool
 
 __all__ = [
     "AnalyticsError",
     "AsyncMemBlock",
+    "AsyncMemBlockPool",
     "MemBlock",
+    "MemBlockPool",
     "NoiseFilter",
     "OrgAnalytics",
     "QuestionRecord",

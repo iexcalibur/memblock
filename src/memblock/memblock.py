@@ -92,6 +92,7 @@ class MemBlock:
         conflict_resolution: bool = False,
         enable_analytics: bool = False,
         analytics_noise_words: set[str] | None = None,
+        pool: Any = None,
     ) -> None:
         """
         Initialize MemBlock.
@@ -147,6 +148,10 @@ class MemBlock:
                 When True, exposes log_question(), get_top_questions(), etc.
             analytics_noise_words: Additional noise words to filter from analytics
                 (e.g. greetings, filler). Merged with built-in defaults.
+            pool: Optional psycopg_pool.ConnectionPool for PostgreSQL connection
+                pooling. When provided, the adapter obtains connections from the
+                pool instead of creating its own. Ignored for SQLite storage.
+                Install with: pip install memblock[pool]
         """
         # ── License validation (disabled — re-enable for paid tier) ──
         # secret = get_secret()
@@ -175,7 +180,8 @@ class MemBlock:
                     self._hooks.register(EventType(event_name), cb)
 
         # Parse storage URI
-        self._storage = self._create_storage(storage, user_id)
+        self._pool = pool
+        self._storage = self._create_storage(storage, user_id, pool=pool)
         self._storage.initialize()
 
         # Initialize embedding provider (optional)
@@ -227,7 +233,7 @@ class MemBlock:
         self._analytics = None  # Lazy-initialized
 
     @staticmethod
-    def _create_storage(uri: str, user_id: str = "default") -> StorageAdapter:
+    def _create_storage(uri: str, user_id: str = "default", pool: Any = None) -> StorageAdapter:
         """Create a storage adapter from a URI string."""
         if uri.startswith("postgresql://") or uri.startswith("postgres://"):
             try:
@@ -237,7 +243,7 @@ class MemBlock:
                     "PostgreSQL adapter requires psycopg. "
                     "Install with: pip install memblock[postgres]"
                 )
-            return PostgreSQLAdapter(dsn=uri, user_id=user_id)
+            return PostgreSQLAdapter(dsn=uri, user_id=user_id, pool=pool)
         elif uri.startswith("sqlite:///"):
             db_path = uri[len("sqlite:///"):]
             return SQLiteAdapter(db_path)
