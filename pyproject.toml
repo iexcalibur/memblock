@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memblock"
-version = "0.6.0"
+version = "0.6.1"
 description = "Typed block tree + knowledge graph memory SDK for AI agents"
 readme = "README.md"
 license = {text = "Proprietary"}
@@ -49,13 +49,20 @@ embeddings-gemini = ["httpx>=0.24"]
 llm-gemini = ["google-genai>=1.0"]
 reranker-cohere = ["httpx>=0.24"]
 reranker-cross-encoder = ["sentence-transformers>=2.0"]
-all = [
+all-cloud = [
     "memblock[postgres]",
     "memblock[pool]",
     "memblock[pgvector]",
     "memblock[tokens]",
     "memblock[llm]",
+    "memblock[embeddings-openai]",
+    "memblock[embeddings-gemini]",
+    "memblock[reranker-cohere]",
+]
+all = [
+    "memblock[all-cloud]",
     "memblock[embeddings]",
+    "memblock[reranker-cross-encoder]",
 ]
 dev = [
     "pytest>=7.0",

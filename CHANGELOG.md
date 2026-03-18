@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.1
+
+### Added
+- **`[all-cloud]` install extra**: `pip install "memblock[all-cloud]"` installs all features except `fastembed` and `sentence-transformers` (which require `onnxruntime`). Works on Python 3.13+ where `onnxruntime` has no pre-built wheels. Includes cloud embeddings (OpenAI, Gemini), LLM extraction, PostgreSQL, pgvector, pooling, tokens, and Cohere reranker.
+
+### Changed
+- **`[all]` extra now includes `[all-cloud]`**: `[all]` is a superset of `[all-cloud]` plus local embeddings (`fastembed`) and cross-encoder reranker. Use `[all]` on Python ≤ 3.12 where `onnxruntime` is available.
+
 ## v0.4.3
 
 ### Changed

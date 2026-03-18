@@ -2,7 +2,7 @@
   <h1 align="center">MemBlock</h1>
   <p align="center"><strong>Structured memory SDK for AI agents.</strong></p>
   <p align="center">Give your AI applications persistent, queryable, and intelligent memory — without cloud dependencies.</p>
-  <p align="center"><code>Python 3.10+</code> · <code>335 Tests</code> · <code>v0.4.0</code> · <code>Private Distribution</code></p>
+  <p align="center"><code>Python 3.10+</code> · <code>510 Tests</code> · <code>v0.6.1</code> · <code>Private Distribution</code></p>
 </p>
 
 ---
@@ -300,6 +300,44 @@ mem.on("on_add", on_memory_added)
 mem.on("on_delete", lambda data: log.warning(f"Deleted: {data['block_id']}"))
 ```
 
+### Connection Pooling (PostgreSQL)
+Production deployments need connection pooling. Pass a `psycopg_pool.ConnectionPool` to avoid per-request connection overhead. Connections are borrowed from the pool and returned on close — no changes to your application code.
+
+```python
+from psycopg_pool import ConnectionPool
+from memblock import MemBlock
+
+pool = ConnectionPool("postgresql://user:pass@localhost/mydb", min_size=4, max_size=20)
+mem = MemBlock(storage="postgresql://user:pass@localhost/mydb", user_id="u_123", pool=pool)
+# connections are borrowed from the pool, returned on mem.close()
+```
+
+### MemBlockPool (Instance Factory)
+Manage per-user MemBlock instances with LRU caching. Ideal for multi-tenant FastAPI/Django backends serving many concurrent users without creating unbounded connections.
+
+```python
+from memblock import MemBlockPool, AsyncMemBlockPool
+
+# Sync
+with MemBlockPool("postgresql://...", max_instances=100) as pool:
+    mem = pool.get("user_123")  # cached or created
+    mem.store("Hello", type=BlockType.FACT)
+
+# Async (FastAPI)
+async with AsyncMemBlockPool("postgresql://...", max_instances=100) as pool:
+    mem = await pool.get("user_456")
+    await mem.store("Hello", type=BlockType.FACT)
+```
+
+### pgvector Support
+When the `pgvector` PostgreSQL extension is installed, MemBlock automatically detects it and uses server-side HNSW vector search instead of brute-force Python cosine similarity. Dual-write keeps backward compatibility — BYTEA embeddings are always stored alongside the pgvector column.
+
+```bash
+pip install "memblock[pgvector]"
+```
+
+No code changes needed. If pgvector is available in your database, `_hybrid_search` uses `<=>` cosine distance for fast ANN queries. If not, it falls back to Python-side cosine.
+
 ### Multi-Storage
 **SQLite** for local development and single-user apps. **PostgreSQL** for production multi-tenant deployments with user-level and session-level isolation. Same API — just swap the connection string.
 
@@ -323,7 +361,7 @@ MemBlock is distributed privately. Access is granted on an invite-only basis.
 ### From GitHub Release (authorized users)
 
 ```bash
-pip install https://github.com/iexcalibur/memblock/releases/download/v0.4.0/memblock-0.4.0-py3-none-any.whl
+pip install https://github.com/iexcalibur/memblock/releases/download/v0.6.1/memblock-0.6.1-py3-none-any.whl
 ```
 
 ### Optional Extras
@@ -344,7 +382,16 @@ pip install "memblock[reranker-cohere]"
 # Cross-encoder reranker (HuggingFace)
 pip install "memblock[reranker-cross-encoder]"
 
-# Everything
+# Connection pooling (psycopg_pool)
+pip install "memblock[pool]"
+
+# pgvector support (server-side vector search)
+pip install "memblock[pgvector]"
+
+# Everything (cloud-only — works on Python 3.13+)
+pip install "memblock[all-cloud]"
+
+# Everything including local embeddings (requires Python ≤ 3.12)
 pip install "memblock[all]"
 ```
 
@@ -361,6 +408,7 @@ pip install "memblock[all]"
 | **Sessions** | `get_sessions()`, `get_session_history()` |
 | **Hooks** | `on()` — register callbacks for `on_add`, `on_update`, `on_delete`, `on_query` |
 | **Async** | `AsyncMemBlock` — full async wrapper for all methods above |
+| **Pool** | `MemBlockPool.get()`, `MemBlockPool.remove()`, `MemBlockPool.close_all()` |
 | **Manage** | `prune()`, `strongest()`, `weakest()`, `verify()`, `stats()`, `export_markdown()` |
 
 ---
@@ -383,7 +431,8 @@ MemBlock (facade)
 ├── ConflictResolver — LLM-powered ADD/UPDATE/DELETE/NONE decisions
 ├── Reranker        — BM25, Cohere, CrossEncoder (pluggable)
 ├── HierarchicalScoping — org → project → user → agent → session
-└── StorageAdapter  — SQLite or PostgreSQL (swappable)
+├── MemBlockPool    — LRU-cached per-user instance factory
+└── StorageAdapter  — SQLite or PostgreSQL (swappable, pooling + pgvector)
 ```
 
 Every component is testable in isolation. The facade composes them into a single clean API.
@@ -400,7 +449,7 @@ Features planned for future releases:
 - **Framework integrations** — LangChain, CrewAI, AutoGen, Vercel AI SDK drop-in support
 - **MCP server** — Model Context Protocol server for IDE and agent integrations
 - **Managed cloud platform** — Optional hosted version for teams that don't want to self-host
-- **Additional vector store backends** — pgvector, Qdrant, Pinecone, ChromaDB support
+- **Additional vector store backends** — Qdrant, Pinecone, ChromaDB support (pgvector shipped in v0.6.0)
 - **Token compression** — Smarter context building with LLM-powered summarization
 - **Multi-agent memory sharing** — Shared memory pools between agents with access control
 

@@ -65,7 +65,8 @@ pip install "memblock[embeddings]"          # Local vector embeddings (FastEmbed
 pip install "memblock[llm]"                 # LLM extraction (OpenAI, Anthropic, Gemini)
 pip install "memblock[reranker-cohere]"     # Cohere reranker
 pip install "memblock[reranker-cross-encoder]"  # HuggingFace reranker
-pip install "memblock[all]"                 # Everything
+pip install "memblock[all-cloud]"           # Everything without onnxruntime (Python 3.13+)
+pip install "memblock[all]"                 # Everything including local embeddings
 ```
 
 ## Documentation
