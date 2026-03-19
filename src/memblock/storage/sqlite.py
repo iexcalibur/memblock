@@ -181,8 +181,9 @@ class SQLiteAdapter(StorageAdapter):
             """INSERT OR REPLACE INTO block_metadata
                (block_id, confidence, source, created_at, created_by,
                 access_count, last_accessed, decay_rate, ttl, session_id,
-                org_id, project_id, agent_id, custom_metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                org_id, project_id, agent_id, custom_metadata,
+                happened_at, happened_at_end, temporal_precision)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 block.id,
                 block.metadata.confidence,
@@ -198,6 +199,9 @@ class SQLiteAdapter(StorageAdapter):
                 block.metadata.project_id,
                 block.metadata.agent_id,
                 json.dumps(block.metadata.custom_metadata) if block.metadata.custom_metadata else None,
+                block.metadata.happened_at.isoformat() if block.metadata.happened_at else None,
+                block.metadata.happened_at_end.isoformat() if block.metadata.happened_at_end else None,
+                block.metadata.temporal_precision,
             ),
         )
 
@@ -216,7 +220,8 @@ class SQLiteAdapter(StorageAdapter):
         cur.execute(
             """SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
-                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata,
+                       m.happened_at, m.happened_at_end, m.temporal_precision
                FROM blocks b
                LEFT JOIN block_metadata m ON b.id = m.block_id
                WHERE b.id = ?""",
@@ -270,6 +275,12 @@ class SQLiteAdapter(StorageAdapter):
                 block.metadata.last_accessed = value
             elif key == "decay_rate":
                 block.metadata.decay_rate = value
+            elif key == "happened_at":
+                block.metadata.happened_at = value
+            elif key == "happened_at_end":
+                block.metadata.happened_at_end = value
+            elif key == "temporal_precision":
+                block.metadata.temporal_precision = value
 
         self.save_block(block)
 
@@ -329,6 +340,19 @@ class SQLiteAdapter(StorageAdapter):
                 params.append(f"$.{key}")
                 params.append(str(value) if not isinstance(value, str) else value)
 
+        if "happened_after" in filters:
+            conditions.append("m.happened_at >= ?")
+            params.append(filters["happened_after"].isoformat())
+
+        if "happened_before" in filters:
+            conditions.append("m.happened_at <= ?")
+            params.append(filters["happened_before"].isoformat())
+
+        if "temporal_range" in filters:
+            start, end = filters["temporal_range"]
+            conditions.append("m.happened_at >= ? AND m.happened_at <= ?")
+            params.extend([start.isoformat(), end.isoformat()])
+
         if "text_search" in filters:
             use_fts = True
             # Sanitize FTS5 query: remove special characters, wrap terms in quotes
@@ -343,7 +367,8 @@ class SQLiteAdapter(StorageAdapter):
             sql = """
                 SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
                        m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
-                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata,
+                       m.happened_at, m.happened_at_end, m.temporal_precision
                 FROM blocks b
                 LEFT JOIN block_metadata m ON b.id = m.block_id
                 INNER JOIN blocks_fts fts ON b.id = fts.block_id
@@ -356,7 +381,8 @@ class SQLiteAdapter(StorageAdapter):
             sql = """
                 SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
                        m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
-                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata,
+                       m.happened_at, m.happened_at_end, m.temporal_precision
                 FROM blocks b
                 LEFT JOIN block_metadata m ON b.id = m.block_id
             """
@@ -387,7 +413,8 @@ class SQLiteAdapter(StorageAdapter):
             cur.execute(
                 """SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
                           m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
-                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata,
+                       m.happened_at, m.happened_at_end, m.temporal_precision
                    FROM blocks b
                    LEFT JOIN block_metadata m ON b.id = m.block_id
                    ORDER BY b.created_at DESC"""
@@ -396,7 +423,8 @@ class SQLiteAdapter(StorageAdapter):
             cur.execute(
                 """SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
                           m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
-                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata,
+                       m.happened_at, m.happened_at_end, m.temporal_precision
                    FROM blocks b
                    LEFT JOIN block_metadata m ON b.id = m.block_id
                    WHERE b.deleted = 0
@@ -778,6 +806,9 @@ class SQLiteAdapter(StorageAdapter):
                 project_id=row["project_id"] if "project_id" in row.keys() else None,
                 agent_id=row["agent_id"] if "agent_id" in row.keys() else None,
                 custom_metadata=json.loads(row["custom_metadata"]) if ("custom_metadata" in row.keys() and row["custom_metadata"]) else None,
+                happened_at=datetime.fromisoformat(row["happened_at"]) if ("happened_at" in row.keys() and row["happened_at"]) else None,
+                happened_at_end=datetime.fromisoformat(row["happened_at_end"]) if ("happened_at_end" in row.keys() and row["happened_at_end"]) else None,
+                temporal_precision=row["temporal_precision"] if ("temporal_precision" in row.keys() and row["temporal_precision"]) else "exact",
             ),
             encryption_level=EncryptionLevel(row["encryption_level"]),
             encrypted=bool(row["encrypted"]),
@@ -796,7 +827,8 @@ class SQLiteAdapter(StorageAdapter):
         cur.execute(
             """SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
                       m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
-                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata,
+                       m.happened_at, m.happened_at_end, m.temporal_precision
                FROM blocks b
                LEFT JOIN block_metadata m ON b.id = m.block_id
                WHERE b.content_hash = ? AND b.deleted = 0

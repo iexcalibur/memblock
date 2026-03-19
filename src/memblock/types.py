@@ -134,6 +134,9 @@ class BlockMetadata:
     project_id: str | None = None  # optional project scope
     agent_id: str | None = None  # optional agent scope
     custom_metadata: dict[str, Any] | None = None  # arbitrary key-value metadata
+    happened_at: datetime | None = None  # when the event/fact occurred (distinct from created_at)
+    happened_at_end: datetime | None = None  # end of time range for durations
+    temporal_precision: str = "exact"  # exact|day|week|month|year|approximate
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -150,6 +153,9 @@ class BlockMetadata:
             "project_id": self.project_id,
             "agent_id": self.agent_id,
             "custom_metadata": self.custom_metadata,
+            "happened_at": self.happened_at.isoformat() if self.happened_at else None,
+            "happened_at_end": self.happened_at_end.isoformat() if self.happened_at_end else None,
+            "temporal_precision": self.temporal_precision,
         }
 
     @classmethod
@@ -168,6 +174,9 @@ class BlockMetadata:
             project_id=data.get("project_id"),
             agent_id=data.get("agent_id"),
             custom_metadata=data.get("custom_metadata"),
+            happened_at=datetime.fromisoformat(data["happened_at"]) if data.get("happened_at") else None,
+            happened_at_end=datetime.fromisoformat(data["happened_at_end"]) if data.get("happened_at_end") else None,
+            temporal_precision=data.get("temporal_precision", "exact"),
         )
 
 

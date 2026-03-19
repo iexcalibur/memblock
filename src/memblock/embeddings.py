@@ -105,12 +105,18 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
 
 class GeminiEmbeddingProvider(EmbeddingProvider):
-    """Google Gemini text-embedding-004 (768 dimensions)."""
+    """Google Gemini embedding provider (text-embedding-004, gemini-embedding-2-preview, etc.)."""
+
+    # Known default dimensions per model
+    _MODEL_DIMS: dict[str, int] = {
+        "text-embedding-004": 768,
+        "gemini-embedding-2-preview": 3072,
+    }
 
     def __init__(self, api_key: str, model: str = "text-embedding-004") -> None:
         self._api_key = api_key
         self._model = model
-        self._dims = 768
+        self._dims = self._MODEL_DIMS.get(model, 768)
 
     @property
     def dimensions(self) -> int:
@@ -199,4 +205,34 @@ def rrf_merge(
         scores[block_id] = scores.get(block_id, 0.0) + 1.0 / (k + rank + 1)
     for rank, block_id in enumerate(vec_ids):
         scores[block_id] = scores.get(block_id, 0.0) + 1.0 / (k + rank + 1)
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+
+def weighted_rrf_merge(
+    fts_ids: list[str],
+    vec_ids: list[str],
+    vec_scores: dict[str, float] | None = None,
+    k: int = 60,
+    fts_weight: float = 0.4,
+    vec_weight: float = 0.6,
+) -> list[tuple[str, float]]:
+    """
+    Weighted Reciprocal Rank Fusion — merge FTS and vector results with tunable weights.
+
+    Returns list of (block_id, rrf_score) sorted by combined score.
+    Also blends raw cosine similarity when available for better scoring.
+    """
+    scores: dict[str, float] = {}
+    for rank, block_id in enumerate(fts_ids):
+        scores[block_id] = scores.get(block_id, 0.0) + fts_weight / (k + rank + 1)
+    for rank, block_id in enumerate(vec_ids):
+        scores[block_id] = scores.get(block_id, 0.0) + vec_weight / (k + rank + 1)
+
+    # Blend raw cosine similarity if available (normalized to same scale)
+    if vec_scores:
+        max_rrf = max(scores.values()) if scores else 1.0
+        for block_id, cos_sim in vec_scores.items():
+            # Add cosine similarity as a bonus (scaled to ~half of max RRF)
+            scores[block_id] = scores.get(block_id, 0.0) + cos_sim * max_rrf * 0.5
+
     return sorted(scores.items(), key=lambda x: x[1], reverse=True)

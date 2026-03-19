@@ -329,8 +329,9 @@ class PostgreSQLAdapter(StorageAdapter):
                 INSERT INTO {self.schema}.memblock_metadata
                     (block_id, user_id, confidence, source, created_at, created_by,
                      access_count, last_accessed, decay_rate, ttl, session_id,
-                     org_id, project_id, agent_id, custom_metadata)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     org_id, project_id, agent_id, custom_metadata,
+                     happened_at, happened_at_end, temporal_precision)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (block_id, user_id) DO UPDATE SET
                     confidence = EXCLUDED.confidence,
                     source = EXCLUDED.source,
@@ -343,7 +344,10 @@ class PostgreSQLAdapter(StorageAdapter):
                     org_id = EXCLUDED.org_id,
                     project_id = EXCLUDED.project_id,
                     agent_id = EXCLUDED.agent_id,
-                    custom_metadata = EXCLUDED.custom_metadata
+                    custom_metadata = EXCLUDED.custom_metadata,
+                    happened_at = EXCLUDED.happened_at,
+                    happened_at_end = EXCLUDED.happened_at_end,
+                    temporal_precision = EXCLUDED.temporal_precision
             """, (
                 block.id,
                 self.user_id,
@@ -360,6 +364,9 @@ class PostgreSQLAdapter(StorageAdapter):
                 block.metadata.project_id,
                 block.metadata.agent_id,
                 json.dumps(block.metadata.custom_metadata) if block.metadata.custom_metadata else None,
+                block.metadata.happened_at.isoformat() if block.metadata.happened_at else None,
+                block.metadata.happened_at_end.isoformat() if block.metadata.happened_at_end else None,
+                block.metadata.temporal_precision,
             ))
 
         self.conn.commit()
@@ -369,7 +376,8 @@ class PostgreSQLAdapter(StorageAdapter):
             cur.execute(f"""
                 SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
                        m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
-                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata,
+                       m.happened_at, m.happened_at_end, m.temporal_precision
                 FROM {self.schema}.memblock_blocks b
                 LEFT JOIN {self.schema}.memblock_metadata m
                     ON b.id = m.block_id AND b.user_id = m.user_id
@@ -480,6 +488,19 @@ class PostgreSQLAdapter(StorageAdapter):
             if tag_conditions:
                 conditions.append(f"({' OR '.join(tag_conditions)})")
 
+        if "happened_after" in filters:
+            conditions.append("m.happened_at >= %s")
+            params.append(filters["happened_after"].isoformat())
+
+        if "happened_before" in filters:
+            conditions.append("m.happened_at <= %s")
+            params.append(filters["happened_before"].isoformat())
+
+        if "temporal_range" in filters:
+            start, end = filters["temporal_range"]
+            conditions.append("m.happened_at >= %s AND m.happened_at <= %s")
+            params.extend([start.isoformat(), end.isoformat()])
+
         if "text_search" in filters:
             # PostgreSQL full-text search using tsvector
             import re
@@ -504,7 +525,8 @@ class PostgreSQLAdapter(StorageAdapter):
         sql = f"""
             SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
                    m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
-                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata,
+                       m.happened_at, m.happened_at_end, m.temporal_precision
             FROM {self.schema}.memblock_blocks b
             LEFT JOIN {self.schema}.memblock_metadata m
                 ON b.id = m.block_id AND b.user_id = m.user_id
@@ -528,7 +550,8 @@ class PostgreSQLAdapter(StorageAdapter):
                 cur.execute(f"""
                     SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
                            m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
-                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata,
+                       m.happened_at, m.happened_at_end, m.temporal_precision
                     FROM {self.schema}.memblock_blocks b
                     LEFT JOIN {self.schema}.memblock_metadata m
                         ON b.id = m.block_id AND b.user_id = m.user_id
@@ -539,7 +562,8 @@ class PostgreSQLAdapter(StorageAdapter):
                 cur.execute(f"""
                     SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
                            m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
-                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata,
+                       m.happened_at, m.happened_at_end, m.temporal_precision
                     FROM {self.schema}.memblock_blocks b
                     LEFT JOIN {self.schema}.memblock_metadata m
                         ON b.id = m.block_id AND b.user_id = m.user_id
@@ -1056,6 +1080,9 @@ class PostgreSQLAdapter(StorageAdapter):
                 project_id=row.get("project_id"),
                 agent_id=row.get("agent_id"),
                 custom_metadata=row.get("custom_metadata") if isinstance(row.get("custom_metadata"), dict) else (json.loads(row["custom_metadata"]) if row.get("custom_metadata") else None),
+                happened_at=datetime.fromisoformat(row["happened_at"]) if (row.get("happened_at") and isinstance(row["happened_at"], str)) else (row.get("happened_at") if isinstance(row.get("happened_at"), datetime) else None),
+                happened_at_end=datetime.fromisoformat(row["happened_at_end"]) if (row.get("happened_at_end") and isinstance(row["happened_at_end"], str)) else (row.get("happened_at_end") if isinstance(row.get("happened_at_end"), datetime) else None),
+                temporal_precision=row.get("temporal_precision") or "exact",
             ),
             encryption_level=EncryptionLevel(row["encryption_level"]),
             encrypted=bool(row["encrypted"]),
@@ -1074,7 +1101,8 @@ class PostgreSQLAdapter(StorageAdapter):
             cur.execute(f"""
                 SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
                        m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
-                       m.org_id, m.project_id, m.agent_id, m.custom_metadata
+                       m.org_id, m.project_id, m.agent_id, m.custom_metadata,
+                       m.happened_at, m.happened_at_end, m.temporal_precision
                 FROM {self.schema}.memblock_blocks b
                 LEFT JOIN {self.schema}.memblock_metadata m
                     ON b.id = m.block_id AND b.user_id = m.user_id

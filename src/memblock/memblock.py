@@ -336,6 +336,9 @@ class MemBlock:
         project_id: str | None = None,
         agent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        happened_at: Any | None = None,
+        happened_at_end: Any | None = None,
+        temporal_precision: str = "exact",
     ) -> Block:
         """
         Store a new memory block.
@@ -442,6 +445,9 @@ class MemBlock:
             project_id=project_id or self._project_id,
             agent_id=agent_id or self._agent_id,
             custom_metadata=metadata,
+            happened_at=happened_at,
+            happened_at_end=happened_at_end,
+            temporal_precision=temporal_precision,
         )
 
         if encrypted:
@@ -633,6 +639,44 @@ class MemBlock:
             agent_id=agent_id or self._agent_id,
             metadata_filters=metadata_filters,
         )
+
+    def multi_hop_query(
+        self,
+        text_search: str,
+        limit: int = 10,
+        session_id: str | None = None,
+        org_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+        metadata_filters: dict[str, Any] | None = None,
+    ) -> list[Block]:
+        """
+        Multi-hop iterative retrieval for complex reasoning queries.
+
+        Performs multiple retrieval passes:
+        1. Standard hybrid search for initial results
+        2. Entity extraction + focused queries
+        3. Graph walk from retrieved blocks with proximity boosting
+
+        Best for questions requiring connecting multiple facts.
+        """
+        from memblock.multihop import MultiHopRetriever
+        retriever = MultiHopRetriever(
+            query_engine=self._query,
+            graph=self._graph,
+            storage=self._storage,
+            decay=self._decay,
+        )
+        result = retriever.retrieve(
+            query=text_search,
+            limit=limit,
+            session_id=session_id or self._session_id,
+            org_id=org_id or self._org_id,
+            project_id=project_id or self._project_id,
+            agent_id=agent_id or self._agent_id,
+            metadata_filters=metadata_filters,
+        )
+        return result.blocks
 
     # ─── Context Builder ──────────────────────────────────────────────────
 

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 # The latest schema version. Bump this when adding new migrations.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 @dataclass
@@ -249,6 +249,44 @@ MIGRATIONS: list[Migration] = [
             cur.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_mb_org_question_events_time "
                 f"ON {schema}.memblock_org_question_events(org_id, asked_at)"
+            ),
+        ),
+    ),
+    Migration(
+        version=7,
+        description="Add temporal fields (happened_at, happened_at_end, temporal_precision) to block_metadata",
+        up_sqlite=lambda cur: (
+            cur.execute("PRAGMA table_info(block_metadata)"),
+            [
+                cur.execute(f"ALTER TABLE block_metadata ADD COLUMN {col}")
+                for col in (
+                    "happened_at TEXT",
+                    "happened_at_end TEXT",
+                    "temporal_precision TEXT DEFAULT 'exact'",
+                )
+                if col.split()[0] not in {
+                    row[1]
+                    for row in cur.execute("PRAGMA table_info(block_metadata)").fetchall()
+                }
+            ],
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_metadata_happened_at ON block_metadata(happened_at)"
+            ),
+        ),
+        up_postgres=lambda cur, schema: (
+            cur.execute(
+                f"ALTER TABLE {schema}.memblock_metadata ADD COLUMN IF NOT EXISTS happened_at TIMESTAMPTZ"
+            ),
+            cur.execute(
+                f"ALTER TABLE {schema}.memblock_metadata ADD COLUMN IF NOT EXISTS happened_at_end TIMESTAMPTZ"
+            ),
+            cur.execute(
+                f"ALTER TABLE {schema}.memblock_metadata ADD COLUMN IF NOT EXISTS "
+                f"temporal_precision TEXT DEFAULT 'exact'"
+            ),
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_mb_metadata_happened_at "
+                f"ON {schema}.memblock_metadata(user_id, happened_at)"
             ),
         ),
     ),

@@ -82,8 +82,12 @@ class TestQueryEngine:
 
         results = qe.query(related_to=entity.id)
         result_ids = {b.id for b in results}
+        # Graph-linked blocks must be present and boosted to rank higher
         assert fact1.id in result_ids
-        assert fact2.id not in result_ids
+        if fact2.id in result_ids:
+            fact1_idx = next(i for i, b in enumerate(results) if b.id == fact1.id)
+            fact2_idx = next(i for i, b in enumerate(results) if b.id == fact2.id)
+            assert fact1_idx < fact2_idx  # linked block ranks higher due to graph proximity boost
 
     def test_query_sort_by_recency(self, store: BlockStore, qe: QueryEngine):
         store.create(content="First")

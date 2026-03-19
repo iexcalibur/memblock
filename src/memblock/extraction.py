@@ -44,21 +44,33 @@ from memblock.types import BlockType, SourceType
 EXTRACTION_SYSTEM_PROMPT = """You are a memory extraction engine. Given a conversation between a user and an AI assistant, extract structured memory blocks.
 
 For each piece of knowledge found, output a JSON array of objects with these fields:
-- "content": the memory text (concise, factual)
+- "content": the memory text (concise, factual, self-contained — include the subject so the memory is useful standalone)
 - "type": one of "fact", "preference", "event", "entity", "relation"
 - "confidence": float 0.0-1.0 (how certain is this information)
 - "source": one of "explicit" (user directly stated), "inferred" (derived from context), "observed" (noticed from behavior)
 - "tags": list of relevant tags (1-3 short words)
+- "happened_at": ISO date/datetime when the event/fact occurred (if mentioned or inferable), null otherwise. For events, always try to extract the date. Use the conversation context to infer approximate dates.
+- "temporal_precision": one of "exact", "day", "week", "month", "year", "approximate" — how precise the temporal information is
+- "subject": the main entity this memory is about (person name, place, organization, etc.), null if not applicable
 - "relations": list of objects {"target_content": "...", "relation": "supports|contradicts|about|related_to"} (optional connections between extracted memories)
+
+Extraction guidelines by type:
+- "fact": Extract as subject-predicate-object triples when possible. E.g., "Alice works at Google as a senior engineer" not "works at Google".
+- "preference": Include who holds the preference and what specifically they prefer. E.g., "User prefers Python over JavaScript for backend work".
+- "event": ALWAYS include when it happened (happened_at). Include who was involved and what occurred. E.g., "User deployed v2.0 to production on March 10, 2024".
+- "entity": Extract the entity's full name and key attributes. E.g., "Project Alpha — internal code name for the new authentication system".
+- "relation": Describe the relationship between two specific entities. E.g., "Alice mentors Bob on the backend team".
 
 Rules:
 1. Extract ONLY factual, useful knowledge — not small talk or filler
-2. Be concise — each content should be a single clear statement
+2. Be concise but SELF-CONTAINED — each content should be understandable without the original conversation
 3. Set confidence based on how explicitly the information was stated
 4. Use "inferred" source for things derived from context, not directly said
 5. If nothing worth remembering, return an empty array []
 6. DO NOT extract information that is too vague or temporary
-7. Focus on: user preferences, facts about the user, important events, entities mentioned, relationships between things
+7. For events, ALWAYS attempt to extract or infer a date (happened_at)
+8. Include the subject's name in fact and preference content so the memory is findable via search
+9. Extract separate blocks for separate facts — don't combine unrelated information
 
 Respond with ONLY the JSON array, no other text."""
 
@@ -345,13 +357,32 @@ class LLMExtractor:
                     block_type = BlockType(item.get("type", "fact"))
                     source = SourceType(item.get("source", "inferred"))
 
-                    block = memblock.store(
+                    # Parse temporal data from extraction
+                    happened_at = None
+                    happened_at_end = None
+                    temporal_precision = item.get("temporal_precision", "exact")
+                    raw_happened = item.get("happened_at")
+                    if raw_happened:
+                        try:
+                            from datetime import datetime
+                            happened_at = datetime.fromisoformat(raw_happened)
+                        except (ValueError, TypeError):
+                            pass  # skip invalid dates
+
+                    store_kwargs: dict[str, Any] = dict(
                         content=item["content"],
                         type=block_type,
                         confidence=confidence,
                         source=source,
                         tags=item.get("tags", []),
                     )
+                    if happened_at is not None:
+                        store_kwargs["happened_at"] = happened_at
+                        store_kwargs["temporal_precision"] = temporal_precision
+                    if happened_at_end is not None:
+                        store_kwargs["happened_at_end"] = happened_at_end
+
+                    block = memblock.store(**store_kwargs)
 
                     result.block_ids.append(block.id)
                     result.blocks_created += 1

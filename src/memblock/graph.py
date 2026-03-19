@@ -172,6 +172,45 @@ class GraphIndex:
 
         return result
 
+    def traverse_with_depth(
+        self,
+        start_id: str,
+        max_depth: int = 3,
+        relation: EdgeRelation | None = None,
+    ) -> dict[str, int]:
+        """
+        BFS traversal returning hop distances from the starting block.
+
+        Returns dict of {block_id: hop_distance} for all reachable non-deleted blocks.
+        Excludes the starting block itself.
+        """
+        visited: set[str] = {start_id}
+        result: dict[str, int] = {}
+        queue: deque[tuple[str, int]] = deque([(start_id, 0)])
+
+        while queue:
+            current_id, depth = queue.popleft()
+            if depth >= max_depth:
+                continue
+
+            edges = self.storage.get_edges(current_id)
+            for edge in edges:
+                if relation is not None and edge.relation != relation:
+                    continue
+
+                neighbor_id = (
+                    edge.target_id if edge.source_id == current_id else edge.source_id
+                )
+
+                if neighbor_id not in visited:
+                    visited.add(neighbor_id)
+                    block = self.storage.get_block(neighbor_id)
+                    if block and not block.deleted:
+                        result[neighbor_id] = depth + 1
+                        queue.append((neighbor_id, depth + 1))
+
+        return result
+
     def shortest_path(self, from_id: str, to_id: str) -> list[Block]:
         """
         Find the shortest path between two blocks (BFS).

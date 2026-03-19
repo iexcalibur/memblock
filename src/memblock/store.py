@@ -53,6 +53,9 @@ class BlockStore:
         project_id: str | None = None,
         agent_id: str | None = None,
         custom_metadata: dict[str, Any] | None = None,
+        happened_at: Any | None = None,
+        happened_at_end: Any | None = None,
+        temporal_precision: str = "exact",
     ) -> Block:
         """
         Create a new memory block.
@@ -75,6 +78,9 @@ class BlockStore:
                 project_id=project_id,
                 agent_id=agent_id,
                 custom_metadata=custom_metadata,
+                happened_at=happened_at,
+                happened_at_end=happened_at_end,
+                temporal_precision=temporal_precision,
             ),
             encryption_level=encryption_level,
             parent_id=parent_id,
