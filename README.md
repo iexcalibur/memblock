@@ -39,24 +39,6 @@ mem.link(results[0].id, other.id, relation="related_to")
 mem.verify()
 ```
 
-## What's Included
-
-- **5 typed memory blocks** — FACT, PREFERENCE, EVENT, ENTITY, RELATION
-- **Knowledge graph** — 8 relation types, traversal, no external DB
-- **Hybrid search** — FTS5 + vector similarity with Reciprocal Rank Fusion
-- **Memory decay** — Exponential decay with access reinforcement
-- **AES-256 encryption** — Field-level, your keys, no enterprise tier
-- **Tamper detection** — SHA-256 hash chain on every operation
-- **LLM extraction** — Auto-extract memories from conversations (OpenAI, Anthropic, Gemini)
-- **Conflict resolution** — LLM-powered ADD/UPDATE/DELETE decisions
-- **Context builder** — Token-budgeted, 3 strategies
-- **Async API** — Full async support via AsyncMemBlock
-- **Event hooks** — on_add, on_update, on_delete, on_query
-- **Hierarchical scoping** — org → project → user → agent → session
-- **Rerankers** — BM25, Cohere, CrossEncoder
-- **Storage** — SQLite (local) or PostgreSQL (production)
-- **CLI** — init, query, stats, prune, export, reindex
-
 ## Optional Extras
 
 ```bash

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any
 
 from memblock.block import Block
@@ -11,6 +12,7 @@ from memblock.crypto import CryptoLayerWithPassphrase
 from memblock.decay import DecayEngine
 from memblock.dedup import ContentHasher, DuplicateChecker, DuplicatePolicy
 from memblock.errors import AnalyticsError, DuplicateBlockError, EncryptionError, ExtractionError, LicenseError
+from memblock.background import BackgroundExtractor
 from memblock.hooks import EventType, HookManager
 from memblock.licensing import LicenseInfo, get_secret, get_stored_license, validate_license
 from memblock.graph import GraphIndex
@@ -89,6 +91,8 @@ class MemBlock:
         hooks: dict[str, list] | None = None,
         reranker: Any = None,
         auto_extract_on_store: bool = False,
+        background_extract: bool = False,
+        background_extract_workers: int = 2,
         conflict_resolution: bool = False,
         enable_analytics: bool = False,
         analytics_noise_words: set[str] | None = None,
@@ -140,6 +144,12 @@ class MemBlock:
                 every store() call also runs extraction on the content to
                 automatically derive additional facts, preferences, etc.
                 Extracted blocks are linked via DERIVED_FROM to the original.
+            background_extract: When True (with auto_extract_on_store=True),
+                extraction runs in a background thread instead of blocking
+                store(). store() returns instantly; extracted blocks appear
+                asynchronously. Use wait_for_extractions() to block until done.
+            background_extract_workers: Max concurrent extraction threads
+                (default 2). Keep low to respect LLM rate limits.
             conflict_resolution: When True and an LLM provider + embeddings
                 are configured, store() will first check for semantically
                 similar existing blocks and use the LLM to decide whether
@@ -223,9 +233,22 @@ class MemBlock:
         self._message_count: int = 0
         self._extractor = None  # Lazy-initialized
         self._auto_extract_on_store = auto_extract_on_store
+        self._background_extract = background_extract and auto_extract_on_store
+        self._bg_extractor: BackgroundExtractor | None = None
+        if self._background_extract:
+            self._bg_extractor = BackgroundExtractor(
+                max_workers=background_extract_workers,
+            )
         self._conflict_resolution = conflict_resolution
         self._conflict_resolver = None  # Lazy-initialized
-        self._extracting = False  # Prevents infinite recursion
+        self._extracting = False  # Prevents infinite recursion (sync mode, main thread)
+        self._thread_local = threading.local()  # Per-thread extracting state
+
+        # Auto-linking: automatically build knowledge graph edges during store()
+        self._auto_link = False
+        self._auto_link_max_neighbors = 5
+        self._last_stored_id: str | None = None  # for sequential linking
+        self._tag_index: dict[str, list[str]] = {}  # tag -> list of recent block IDs
 
         # Analytics (opt-in)
         self._enable_analytics = enable_analytics
@@ -317,6 +340,84 @@ class MemBlock:
             self._hooks.register_async(EventType(event), callback)
         else:
             self._hooks.register(EventType(event), callback)
+
+    def enable_auto_link(
+        self,
+        enabled: bool = True,
+        max_neighbors: int = 5,
+    ) -> None:
+        """
+        Enable automatic knowledge graph linking during store().
+
+        When enabled, each store() call will automatically create graph edges:
+        1. Sequential link: RELATED_TO edge to the previously stored block
+        2. Tag-based links: RELATED_TO edges to recent blocks sharing tags
+           (e.g. same session, same speaker)
+
+        This builds a rich knowledge graph without requiring an LLM,
+        enabling multi-hop retrieval and graph-walk context strategies.
+
+        Args:
+            enabled: Turn auto-linking on/off
+            max_neighbors: Max tag-based edges per store() call (default 5)
+        """
+        self._auto_link = enabled
+        self._auto_link_max_neighbors = max_neighbors
+        if enabled:
+            self._last_stored_id = None
+            self._tag_index = {}
+
+    def _auto_link_block(self, block: Block, tags: list[str] | None) -> None:
+        """Create automatic graph edges for a newly stored block."""
+        if not self._auto_link:
+            return
+
+        linked_ids: set[str] = set()
+
+        # 1. Sequential link: connect to the previous block
+        if self._last_stored_id is not None and self._last_stored_id != block.id:
+            try:
+                self._graph.link(
+                    block.id, self._last_stored_id,
+                    relation=EdgeRelation.RELATED_TO, weight=0.8,
+                )
+                linked_ids.add(self._last_stored_id)
+            except Exception:
+                pass
+
+        # 2. Tag-based links: connect to recent blocks with shared tags
+        if tags:
+            candidates: dict[str, int] = {}  # block_id -> shared_tag_count
+            for tag in tags:
+                for prev_id in self._tag_index.get(tag, []):
+                    if prev_id != block.id and prev_id not in linked_ids:
+                        candidates[prev_id] = candidates.get(prev_id, 0) + 1
+
+            # Sort by number of shared tags (more shared = stronger connection)
+            sorted_candidates = sorted(
+                candidates.items(), key=lambda x: x[1], reverse=True
+            )
+
+            for prev_id, shared_count in sorted_candidates[:self._auto_link_max_neighbors]:
+                weight = min(1.0, 0.3 + shared_count * 0.2)  # 0.5 for 1 tag, 0.7 for 2, etc.
+                try:
+                    self._graph.link(
+                        block.id, prev_id,
+                        relation=EdgeRelation.RELATED_TO, weight=weight,
+                    )
+                    linked_ids.add(prev_id)
+                except Exception:
+                    pass
+
+            # Update tag index (keep last 50 per tag to avoid memory bloat)
+            for tag in tags:
+                if tag not in self._tag_index:
+                    self._tag_index[tag] = []
+                self._tag_index[tag].append(block.id)
+                if len(self._tag_index[tag]) > 50:
+                    self._tag_index[tag] = self._tag_index[tag][-50:]
+
+        self._last_stored_id = block.id
 
     # ─── Store Operations ─────────────────────────────────────────────────
 
@@ -467,30 +568,54 @@ class MemBlock:
             "type": type.value,
         })
 
+        # Auto-link: build knowledge graph edges automatically
+        self._auto_link_block(block, tags)
+
         # Auto-extract additional memories from the content
+        # Use thread-local flag to prevent recursive extraction
+        # (extraction stores blocks → store() would re-trigger extraction)
+        _is_extracting = getattr(self._thread_local, 'extracting', False)
         if (
             self._auto_extract_on_store
+            and not _is_extracting
             and not self._extracting
             and self._extract_provider_name is not None
         ):
-            self._extracting = True
-            try:
-                result = self.extract(
-                    conversation=content,
-                    provider=self._extract_provider_name,
-                    api_key=self._extract_api_key,
-                    model=self._extract_model,
-                )
-                # Link extracted blocks to the original via DERIVED_FROM
-                for extracted_id in (result.block_ids if result else []):
+            if self._background_extract and self._bg_extractor is not None:
+                # Background mode: submit to thread pool, return immediately
+                def _extract_fn(text: str) -> Any:
+                    self._thread_local.extracting = True
                     try:
-                        self.link(extracted_id, block.id, relation=EdgeRelation.DERIVED_FROM)
-                    except Exception:
-                        pass
-            except Exception:
-                pass  # extraction failure should not break store
-            finally:
-                self._extracting = False
+                        extractor = self._init_extractor()
+                        return extractor.extract(text, memblock=self)
+                    finally:
+                        self._thread_local.extracting = False
+
+                def _link_fn(extracted_id: str, source_id: str) -> None:
+                    self.link(extracted_id, source_id, relation=EdgeRelation.DERIVED_FROM)
+
+                self._bg_extractor.submit(
+                    block_id=block.id,
+                    content=content,
+                    extract_fn=_extract_fn,
+                    link_fn=_link_fn,
+                )
+            else:
+                # Synchronous mode: block until extraction completes
+                self._extracting = True
+                try:
+                    extractor = self._init_extractor()
+                    result = extractor.extract(content, memblock=self)
+                    # Link extracted blocks to the original via DERIVED_FROM
+                    for extracted_id in (result.block_ids if result else []):
+                        try:
+                            self.link(extracted_id, block.id, relation=EdgeRelation.DERIVED_FROM)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass  # extraction failure should not break store
+                finally:
+                    self._extracting = False
 
         return block
 
@@ -857,6 +982,34 @@ class MemBlock:
         except Exception as e:
             raise ExtractionError(f"Extraction failed: {e}") from e
 
+    # ─── Background Extraction ──────────────────────────────────────────
+
+    @property
+    def extraction_pending(self) -> int:
+        """Number of background extraction jobs still running or queued."""
+        if self._bg_extractor is None:
+            return 0
+        return self._bg_extractor.pending_count
+
+    @property
+    def extraction_stats(self) -> dict[str, int]:
+        """Background extraction worker statistics."""
+        if self._bg_extractor is None:
+            return {"pending": 0, "completed": 0, "failed": 0, "total_submitted": 0}
+        return self._bg_extractor.stats
+
+    def wait_for_extractions(self, timeout: float | None = None) -> None:
+        """
+        Block until all pending background extractions complete.
+
+        Args:
+            timeout: Max seconds to wait. None = wait forever.
+
+        No-op if background extraction is not enabled.
+        """
+        if self._bg_extractor is not None:
+            self._bg_extractor.wait(timeout=timeout)
+
     # ─── Opt-in Auto-Extraction ──────────────────────────────────────────
 
     def add_message(self, role: str, content: str) -> Any:
@@ -1151,7 +1304,9 @@ class MemBlock:
     # ─── Lifecycle ────────────────────────────────────────────────────────
 
     def close(self) -> None:
-        """Close the storage connection."""
+        """Close the storage connection and shut down background workers."""
+        if self._bg_extractor is not None:
+            self._bg_extractor.shutdown(wait=True)
         self._storage.close()
 
     def __enter__(self) -> MemBlock:
