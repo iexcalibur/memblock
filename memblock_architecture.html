@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MemBlock Architecture</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    color: #e6edf3;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 60px;
+    padding: 40px 20px;
+  }
+
+  .diagram {
+    background: #161b22;
+    border-radius: 20px;
+    border: 1px solid #30363d;
+    padding: 50px;
+    max-width: 1400px;
+    width: 100%;
+    position: relative;
+  }
+
+  .diagram-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #8b949e;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 40px;
+    text-align: center;
+  }
+
+  /* SVG styling */
+  svg { width: 100%; height: auto; }
+
+  .phase-bg {
+    fill: #1c2333;
+    stroke: #30363d;
+    stroke-width: 1;
+    rx: 12;
+  }
+
+  .phase-label {
+    font-family: 'Inter', sans-serif;
+    font-size: 16px;
+    font-weight: 600;
+    fill: #e6edf3;
+  }
+
+  .component-box {
+    rx: 8;
+    stroke-width: 0;
+  }
+
+  .component-blue { fill: #3b49df; }
+  .component-purple { fill: #6e40c9; }
+  .component-orange { fill: #d29922; }
+  .component-green { fill: #238636; }
+  .component-red { fill: #da3633; }
+  .component-teal { fill: #1f6feb; }
+  .component-dark { fill: #21262d; stroke: #30363d; stroke-width: 1; }
+
+  .component-text {
+    font-family: 'Inter', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    fill: #ffffff;
+    text-anchor: middle;
+    dominant-baseline: central;
+  }
+
+  .component-text-sm {
+    font-family: 'Inter', sans-serif;
+    font-size: 11px;
+    font-weight: 500;
+    fill: #ffffff;
+    text-anchor: middle;
+    dominant-baseline: central;
+  }
+
+  .label-text {
+    font-family: 'Inter', sans-serif;
+    font-size: 11px;
+    fill: #8b949e;
+    text-anchor: middle;
+    dominant-baseline: central;
+    font-style: italic;
+  }
+
+  .arrow {
+    stroke: #484f58;
+    stroke-width: 1.5;
+    fill: none;
+    marker-end: url(#arrowhead);
+  }
+
+  .arrow-dashed {
+    stroke: #484f58;
+    stroke-width: 1.5;
+    fill: none;
+    stroke-dasharray: 5,4;
+    marker-end: url(#arrowhead);
+  }
+
+  .pill {
+    fill: #21262d;
+    stroke: #30363d;
+    stroke-width: 1;
+    rx: 12;
+  }
+
+  .pill-text {
+    font-family: 'Inter', sans-serif;
+    font-size: 11px;
+    fill: #8b949e;
+    text-anchor: middle;
+    dominant-baseline: central;
+  }
+
+  .logo-text {
+    font-family: 'Inter', sans-serif;
+    font-size: 28px;
+    font-weight: 700;
+    fill: #e6edf3;
+  }
+
+  .logo-sub {
+    font-family: 'Inter', sans-serif;
+    font-size: 12px;
+    fill: #8b949e;
+    font-weight: 400;
+  }
+
+  /* Graph node styling */
+  .graph-node { stroke-width: 0; }
+  .graph-edge { stroke: #484f58; stroke-width: 1; fill: none; }
+</style>
+</head>
+<body>
+
+<!-- DIAGRAM 1: Storage & Graph Pipeline -->
+<div class="diagram">
+  <div class="diagram-title">Extraction & Knowledge Graph Pipeline</div>
+  <svg viewBox="0 0 1300 620" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#484f58"/>
+      </marker>
+      <marker id="arrowhead-blue" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#3b49df"/>
+      </marker>
+    </defs>
+
+    <!-- Messages Input -->
+    <rect x="20" y="200" width="180" height="140" class="component-dark"/>
+    <text x="110" y="230" class="component-text" style="font-size:14px;">Messages</text>
+    <rect x="35" y="255" width="150" height="30" rx="6" fill="#1f6feb" opacity="0.3" stroke="#1f6feb" stroke-width="1"/>
+    <text x="110" y="270" class="component-text-sm">User 1: Hello, I...</text>
+    <rect x="35" y="295" width="150" height="30" rx="6" fill="#1f6feb" opacity="0.3" stroke="#1f6feb" stroke-width="1"/>
+    <text x="110" y="310" class="component-text-sm">Assistant: Sure...</text>
+
+    <!-- Arrow: Messages → Extraction -->
+    <line x1="200" y1="270" x2="280" y2="270" class="arrow"/>
+
+    <!-- Extraction Phase -->
+    <rect x="280" y="100" width="310" height="340" class="phase-bg"/>
+    <rect x="290" y="105" width="130" height="28" rx="4" fill="#21262d" stroke="#d29922" stroke-width="1"/>
+    <text x="355" y="119" class="component-text-sm" style="fill:#d29922;">Extraction Phase</text>
+
+    <!-- LLM Extractor -->
+    <text x="435" y="155" class="label-text" style="font-size:12px;fill:#6e40c9;">LLM</text>
+    <rect x="310" y="168" width="250" height="50" class="component-box component-purple"/>
+    <text x="435" y="193" class="component-text">LLM Extractor</text>
+
+    <!-- Entity/Fact types -->
+    <rect x="310" y="240" width="115" height="38" class="component-box component-blue"/>
+    <text x="367" y="259" class="component-text-sm">FACT</text>
+
+    <rect x="435" y="240" width="115" height="38" class="component-box component-blue"/>
+    <text x="492" y="259" class="component-text-sm">PREFERENCE</text>
+
+    <rect x="310" y="288" width="115" height="38" class="component-box component-blue"/>
+    <text x="367" y="307" class="component-text-sm">EVENT</text>
+
+    <rect x="435" y="288" width="115" height="38" class="component-box component-blue"/>
+    <text x="492" y="307" class="component-text-sm">ENTITY</text>
+
+    <rect x="372" y="336" width="115" height="38" class="component-box component-blue"/>
+    <text x="430" y="355" class="component-text-sm">RELATION</text>
+
+    <!-- Arrow labels -->
+    <text x="435" y="398" class="label-text">typed blocks + confidence</text>
+
+    <!-- Arrow: Extraction → Dedup -->
+    <line x1="590" y1="270" x2="650" y2="270" class="arrow"/>
+    <rect x="601" y="254" width="48" height="22" class="pill"/>
+    <text x="625" y="265" class="pill-text">blocks</text>
+
+    <!-- Dedup & Conflict Phase -->
+    <rect x="650" y="140" width="260" height="260" class="phase-bg"/>
+    <rect x="660" y="145" width="110" height="28" rx="4" fill="#21262d" stroke="#d29922" stroke-width="1"/>
+    <text x="715" y="159" class="component-text-sm" style="fill:#d29922;">Update Phase</text>
+
+    <!-- Dedup -->
+    <rect x="680" y="190" width="200" height="45" class="component-box component-orange"/>
+    <text x="780" y="207" class="component-text">Dedup Engine</text>
+    <text x="780" y="222" class="component-text-sm" style="font-size:10px;opacity:0.7;">SHA-256 + Semantic</text>
+
+    <!-- Conflict Resolver -->
+    <text x="780" y="255" class="label-text" style="font-size:12px;fill:#6e40c9;">LLM</text>
+    <rect x="680" y="265" width="200" height="45" class="component-box component-orange"/>
+    <text x="780" y="282" class="component-text">Conflict Resolver</text>
+    <text x="780" y="297" class="component-text-sm" style="font-size:10px;opacity:0.7;">ADD | UPDATE | DELETE | NOOP</text>
+
+    <!-- Auto-Linker -->
+    <rect x="680" y="330" width="200" height="40" class="component-box component-orange"/>
+    <text x="780" y="350" class="component-text">Auto-Linker</text>
+
+    <!-- Arrow: Dedup → Graph -->
+    <line x1="910" y1="350" x2="970" y2="420" class="arrow"/>
+    <rect x="910" y="368" width="80" height="22" class="pill"/>
+    <text x="950" y="379" class="pill-text">edges</text>
+
+    <!-- Arrow: Dedup → Storage -->
+    <line x1="910" y1="235" x2="970" y2="235" class="arrow"/>
+    <rect x="915" y="210" width="60" height="22" class="pill"/>
+    <text x="945" y="221" class="pill-text">persist</text>
+
+    <!-- Storage -->
+    <rect x="970" y="180" width="140" height="110" class="component-dark"/>
+    <text x="1040" y="210" class="component-text" style="font-size:14px;">Storage</text>
+    <rect x="985" y="225" width="110" height="24" rx="4" fill="#238636" opacity="0.8"/>
+    <text x="1040" y="237" class="component-text-sm">SQLite</text>
+    <rect x="985" y="255" width="110" height="24" rx="4" fill="#238636" opacity="0.8"/>
+    <text x="1040" y="267" class="component-text-sm">PostgreSQL</text>
+
+    <!-- OpLog -->
+    <rect x="1140" y="200" width="140" height="50" class="component-dark"/>
+    <text x="1210" y="220" class="component-text-sm" style="fill:#da3633;">OpLog</text>
+    <text x="1210" y="236" class="component-text-sm" style="font-size:9px;fill:#8b949e;">SHA-256 hash chain</text>
+    <line x1="1110" y1="225" x2="1140" y2="225" class="arrow-dashed"/>
+
+    <!-- Knowledge Graph -->
+    <!-- Graph visualization -->
+    <g transform="translate(970, 370)">
+      <text x="130" y="20" class="component-text" style="font-size:14px;">Knowledge Graph</text>
+
+      <!-- Edges -->
+      <line x1="40" y1="80" x2="100" y2="60" class="graph-edge"/>
+      <line x1="100" y1="60" x2="160" y2="80" class="graph-edge"/>
+      <line x1="100" y1="60" x2="80" y2="130" class="graph-edge"/>
+      <line x1="160" y1="80" x2="200" y2="140" class="graph-edge"/>
+      <line x1="80" y1="130" x2="160" y2="80" class="graph-edge"/>
+      <line x1="40" y1="80" x2="80" y2="130" class="graph-edge"/>
+      <line x1="80" y1="130" x2="140" y2="160" class="graph-edge"/>
+      <line x1="200" y1="140" x2="140" y2="160" class="graph-edge"/>
+      <line x1="160" y1="80" x2="240" y2="100" class="graph-edge"/>
+      <line x1="240" y1="100" x2="200" y2="140" class="graph-edge"/>
+
+      <!-- Nodes -->
+      <circle cx="40" cy="80" r="10" class="graph-node" fill="#3b49df"/>
+      <circle cx="100" cy="60" r="12" class="graph-node" fill="#238636"/>
+      <circle cx="160" cy="80" r="10" class="graph-node" fill="#d29922"/>
+      <circle cx="80" cy="130" r="9" class="graph-node" fill="#6e40c9"/>
+      <circle cx="200" cy="140" r="11" class="graph-node" fill="#3b49df"/>
+      <circle cx="140" cy="160" r="8" class="graph-node" fill="#238636"/>
+      <circle cx="240" cy="100" r="9" class="graph-node" fill="#da3633"/>
+
+      <!-- Edge labels -->
+      <text x="70" y="55" style="font-size:8px;fill:#484f58;font-family:Inter;">ABOUT</text>
+      <text x="130" y="55" style="font-size:8px;fill:#484f58;font-family:Inter;">SUPPORTS</text>
+      <text x="100" y="108" style="font-size:8px;fill:#484f58;font-family:Inter;">RELATED_TO</text>
+      <text x="190" y="170" style="font-size:8px;fill:#484f58;font-family:Inter;">DERIVED_FROM</text>
+
+      <text x="130" y="200" class="label-text">8 relation types · BFS traversal</text>
+    </g>
+
+    <!-- Logo -->
+    <text x="40" y="560" class="logo-text">&#9646; memblock</text>
+    <text x="40" y="580" class="logo-sub">Typed blocks · Knowledge graph · Hybrid search · Encryption · Decay</text>
+  </svg>
+</div>
+
+<!-- DIAGRAM 2: Full Retrieval & Context Pipeline -->
+<div class="diagram">
+  <div class="diagram-title">Retrieval & Context Building Pipeline</div>
+  <svg viewBox="0 0 1300 700" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arrowhead2" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#484f58"/>
+      </marker>
+    </defs>
+
+    <!-- Storage (top center) -->
+    <g transform="translate(530, 20)">
+      <rect x="0" y="0" width="200" height="60" rx="10" fill="#21262d" stroke="#30363d" stroke-width="1"/>
+      <rect x="80" y="-15" width="40" height="30" rx="6" fill="#1f6feb"/>
+      <text x="100" y="2" style="font-family:Inter;font-size:16px;fill:#fff;text-anchor:middle;font-weight:bold;">DB</text>
+      <text x="100" y="38" class="component-text" style="font-size:13px;">Storage + Embeddings</text>
+      <text x="100" y="52" class="component-text-sm" style="font-size:10px;opacity:0.6;">SQLite | PostgreSQL + pgvector</text>
+    </g>
+
+    <!-- Arrows from storage down -->
+    <line x1="580" y1="80" x2="300" y2="150" class="arrow" marker-end="url(#arrowhead2)"/>
+    <line x1="700" y1="80" x2="700" y2="150" class="arrow" marker-end="url(#arrowhead2)"/>
+    <line x1="780" y1="80" x2="960" y2="150" class="arrow" marker-end="url(#arrowhead2)"/>
+
+    <!-- Labels on arrows -->
+    <rect x="370" y="95" width="90" height="20" class="pill"/>
+    <text x="415" y="106" class="pill-text">FTS search</text>
+
+    <rect x="660" y="100" width="100" height="20" class="pill"/>
+    <text x="710" y="111" class="pill-text">vector search</text>
+
+    <rect x="850" y="95" width="110" height="20" class="pill"/>
+    <text x="905" y="106" class="pill-text">graph traverse</text>
+
+    <!-- Query Input (left) -->
+    <rect x="20" y="240" width="180" height="80" class="component-dark"/>
+    <text x="110" y="270" class="component-text" style="font-size:14px;">Query</text>
+    <text x="110" y="290" class="component-text-sm" style="font-size:10px;fill:#8b949e;">"What food does Alice like?"</text>
+
+    <!-- Arrow: Query → Temporal Parse -->
+    <line x1="200" y1="280" x2="250" y2="280" class="arrow" marker-end="url(#arrowhead2)"/>
+
+    <!-- Retrieval Phase -->
+    <rect x="250" y="140" width="800" height="200" class="phase-bg"/>
+    <rect x="260" y="145" width="130" height="28" rx="4" fill="#21262d" stroke="#d29922" stroke-width="1"/>
+    <text x="325" y="159" class="component-text-sm" style="fill:#d29922;">Retrieval Phase</text>
+
+    <!-- Temporal Parser -->
+    <rect x="270" y="190" width="140" height="45" class="component-box component-blue"/>
+    <text x="340" y="207" class="component-text-sm">Temporal Parser</text>
+    <text x="340" y="222" class="component-text-sm" style="font-size:9px;opacity:0.7;">before/after/between</text>
+
+    <!-- FTS Search -->
+    <rect x="270" y="260" width="140" height="45" class="component-box component-blue"/>
+    <text x="340" y="277" class="component-text-sm">FTS5 Search</text>
+    <text x="340" y="292" class="component-text-sm" style="font-size:9px;opacity:0.7;">keyword matching</text>
+
+    <!-- Vector Search -->
+    <rect x="440" y="190" width="160" height="45" class="component-box component-purple"/>
+    <text x="520" y="207" class="component-text">Semantic Search</text>
+    <text x="520" y="222" class="component-text-sm" style="font-size:9px;opacity:0.7;">cosine similarity</text>
+
+    <!-- RRF Merge -->
+    <rect x="440" y="260" width="160" height="45" class="component-box component-purple"/>
+    <text x="520" y="277" class="component-text">RRF Merge</text>
+    <text x="520" y="292" class="component-text-sm" style="font-size:9px;opacity:0.7;">hybrid ranking</text>
+
+    <!-- Arrows: FTS + Vector → RRF -->
+    <line x1="410" y1="282" x2="440" y2="282" class="arrow" marker-end="url(#arrowhead2)"/>
+    <line x1="520" y1="235" x2="520" y2="260" class="arrow" marker-end="url(#arrowhead2)"/>
+
+    <!-- Graph Walk -->
+    <rect x="640" y="190" width="160" height="45" class="component-box component-teal"/>
+    <text x="720" y="207" class="component-text">Graph Proximity</text>
+    <text x="720" y="222" class="component-text-sm" style="font-size:9px;opacity:0.7;">BFS neighbor boost</text>
+
+    <!-- Decay Filter -->
+    <rect x="640" y="260" width="160" height="45" class="component-box component-teal"/>
+    <text x="720" y="277" class="component-text">Decay Filter</text>
+    <text x="720" y="292" class="component-text-sm" style="font-size:9px;opacity:0.7;">strength threshold</text>
+
+    <!-- Relevance Scorer -->
+    <rect x="840" y="200" width="180" height="80" class="component-box component-orange"/>
+    <text x="930" y="225" class="component-text">Relevance Scorer</text>
+    <text x="930" y="243" class="component-text-sm" style="font-size:10px;opacity:0.8;">semantic 50% | confidence 25%</text>
+    <text x="930" y="258" class="component-text-sm" style="font-size:10px;opacity:0.8;">strength 15% | recency 10%</text>
+    <text x="930" y="273" class="component-text-sm" style="font-size:10px;opacity:0.8;">+ graph_boost</text>
+
+    <!-- Arrows into scorer -->
+    <line x1="600" y1="282" x2="640" y2="282" class="arrow" marker-end="url(#arrowhead2)"/>
+    <line x1="800" y1="240" x2="840" y2="240" class="arrow" marker-end="url(#arrowhead2)"/>
+
+    <!-- Arrow: Scorer → Reranker -->
+    <line x1="930" y1="280" x2="930" y2="370" class="arrow" marker-end="url(#arrowhead2)"/>
+    <rect x="895" y="320" width="80" height="22" class="pill"/>
+    <text x="935" y="331" class="pill-text">ranked</text>
+
+    <!-- Multi-Hop Phase -->
+    <rect x="50" y="380" width="400" height="200" class="phase-bg"/>
+    <rect x="60" y="385" width="180" height="28" rx="4" fill="#21262d" stroke="#d29922" stroke-width="1"/>
+    <text x="150" y="399" class="component-text-sm" style="fill:#d29922;">Multi-Hop Retrieval (3 hops)</text>
+
+    <!-- Hop boxes -->
+    <rect x="70" y="430" width="110" height="55" class="component-box component-purple"/>
+    <text x="125" y="450" class="component-text-sm">Hop 1</text>
+    <text x="125" y="468" class="component-text-sm" style="font-size:9px;opacity:0.7;">Hybrid Search</text>
+
+    <rect x="195" y="430" width="110" height="55" class="component-box component-purple"/>
+    <text x="250" y="450" class="component-text-sm">Hop 2</text>
+    <text x="250" y="468" class="component-text-sm" style="font-size:9px;opacity:0.7;">Entity Expansion</text>
+
+    <rect x="320" y="430" width="110" height="55" class="component-box component-purple"/>
+    <text x="375" y="450" class="component-text-sm">Hop 3</text>
+    <text x="375" y="468" class="component-text-sm" style="font-size:9px;opacity:0.7;">Graph Walk</text>
+
+    <!-- Hop arrows -->
+    <line x1="180" y1="458" x2="195" y2="458" class="arrow" marker-end="url(#arrowhead2)"/>
+    <line x1="305" y1="458" x2="320" y2="458" class="arrow" marker-end="url(#arrowhead2)"/>
+
+    <!-- Entity extraction label -->
+    <rect x="80" y="505" width="340" height="55" rx="8" fill="#21262d" stroke="#30363d" stroke-width="1"/>
+    <text x="250" y="525" class="component-text-sm" style="fill:#d29922;">Entity Extraction</text>
+    <text x="250" y="543" class="component-text-sm" style="font-size:9px;fill:#8b949e;">Capitalized words · Quoted strings · Question entities</text>
+
+    <!-- Scoring legend -->
+    <g transform="translate(80, 565)">
+      <rect x="0" y="0" width="16" height="16" rx="3" fill="#238636"/>
+      <text x="22" y="12" style="font-family:Inter;font-size:10px;fill:#8b949e;">Hop 1: +1.0</text>
+      <rect x="95" y="0" width="16" height="16" rx="3" fill="#1f6feb"/>
+      <text x="117" y="12" style="font-family:Inter;font-size:10px;fill:#8b949e;">Q entities: +0.8</text>
+      <rect x="210" y="0" width="16" height="16" rx="3" fill="#6e40c9"/>
+      <text x="232" y="12" style="font-family:Inter;font-size:10px;fill:#8b949e;">Block entities: +0.5</text>
+    </g>
+
+    <!-- Reranker -->
+    <rect x="830" y="380" width="200" height="80" class="phase-bg"/>
+    <rect x="840" y="385" width="90" height="28" rx="4" fill="#21262d" stroke="#d29922" stroke-width="1"/>
+    <text x="885" y="399" class="component-text-sm" style="fill:#d29922;">Reranking</text>
+
+    <rect x="850" y="420" width="55" height="28" rx="6" class="component-box component-green"/>
+    <text x="877" y="434" class="component-text-sm" style="font-size:9px;">BM25</text>
+
+    <rect x="912" y="420" width="55" height="28" rx="6" class="component-box component-green"/>
+    <text x="939" y="434" class="component-text-sm" style="font-size:9px;">Cohere</text>
+
+    <rect x="974" y="420" width="45" height="28" rx="6" class="component-box component-green"/>
+    <text x="996" y="434" class="component-text-sm" style="font-size:8px;">Cross</text>
+
+    <!-- Context Builder Phase -->
+    <rect x="530" y="380" width="260" height="200" class="phase-bg"/>
+    <rect x="540" y="385" width="130" height="28" rx="4" fill="#21262d" stroke="#d29922" stroke-width="1"/>
+    <text x="605" y="399" class="component-text-sm" style="fill:#d29922;">Context Builder</text>
+
+    <!-- Strategies -->
+    <rect x="550" y="425" width="105" height="35" class="component-box component-orange"/>
+    <text x="602" y="443" class="component-text-sm" style="font-size:10px;">relevance</text>
+
+    <rect x="665" y="425" width="105" height="35" class="component-box component-orange"/>
+    <text x="717" y="443" class="component-text-sm" style="font-size:10px;">graph_walk</text>
+
+    <rect x="550" y="470" width="105" height="35" class="component-box component-orange"/>
+    <text x="602" y="488" class="component-text-sm" style="font-size:10px;">type_grouped</text>
+
+    <rect x="665" y="470" width="105" height="35" class="component-box component-orange"/>
+    <text x="717" y="488" class="component-text-sm" style="font-size:10px;">adaptive</text>
+
+    <!-- Token budget -->
+    <rect x="570" y="520" width="180" height="35" rx="6" fill="#21262d" stroke="#30363d" stroke-width="1"/>
+    <text x="660" y="535" class="component-text-sm" style="fill:#8b949e;font-size:10px;">Token Budget: ~4 chars/token</text>
+    <text x="660" y="550" class="component-text-sm" style="fill:#8b949e;font-size:9px;">Fill until budget reached</text>
+
+    <!-- Arrow: Reranker → Context -->
+    <line x1="830" y1="430" x2="790" y2="460" class="arrow" marker-end="url(#arrowhead2)"/>
+
+    <!-- Arrow: Context → Output -->
+    <line x1="660" y1="580" x2="660" y2="620" class="arrow" marker-end="url(#arrowhead2)"/>
+
+    <!-- Output -->
+    <rect x="530" y="620" width="260" height="65" rx="12" fill="#238636"/>
+    <text x="660" y="645" class="component-text" style="font-size:14px;">LLM-Ready Context</text>
+    <text x="660" y="665" class="component-text-sm" style="font-size:10px;opacity:0.8;">[FACT] "Alice likes sushi" conf: 0.95</text>
+
+    <!-- Decay Engine (bottom left) -->
+    <rect x="50" y="610" width="200" height="65" rx="10" fill="#21262d" stroke="#da3633" stroke-width="1"/>
+    <text x="150" y="632" class="component-text-sm" style="fill:#da3633;">Decay Engine</text>
+    <text x="150" y="650" class="component-text-sm" style="font-size:9px;fill:#8b949e;">strength = conf × e^(-rate × hrs)</text>
+    <text x="150" y="664" class="component-text-sm" style="font-size:9px;fill:#8b949e;">× (1 + log(access) × recency)</text>
+
+    <!-- Encryption badge -->
+    <rect x="280" y="630" width="200" height="40" rx="10" fill="#21262d" stroke="#6e40c9" stroke-width="1"/>
+    <text x="380" y="647" class="component-text-sm" style="fill:#6e40c9;">Encryption: AES-256</text>
+    <text x="380" y="661" class="component-text-sm" style="font-size:9px;fill:#8b949e;">NONE | STANDARD | SENSITIVE</text>
+
+    <!-- Logo -->
+    <text x="1060" y="660" class="logo-text" style="font-size:24px;">&#9646; memblock</text>
+    <text x="1060" y="680" class="logo-sub" style="font-size:10px;">All local, all yours</text>
+  </svg>
+</div>
+
+<!-- DIAGRAM 3: Full Store Pipeline -->
+<div class="diagram">
+  <div class="diagram-title">Store Pipeline — End to End</div>
+  <svg viewBox="0 0 1300 480" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arrowhead3" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#484f58"/>
+      </marker>
+    </defs>
+
+    <!-- Step 1: Input -->
+    <rect x="20" y="160" width="120" height="100" class="component-dark"/>
+    <text x="80" y="195" class="component-text" style="font-size:13px;">store()</text>
+    <text x="80" y="215" class="component-text-sm" style="font-size:9px;fill:#8b949e;">content, type</text>
+    <text x="80" y="230" class="component-text-sm" style="font-size:9px;fill:#8b949e;">tags, metadata</text>
+    <text x="80" y="245" class="component-text-sm" style="font-size:9px;fill:#8b949e;">encryption_level</text>
+
+    <line x1="140" y1="210" x2="170" y2="210" class="arrow" marker-end="url(#arrowhead3)"/>
+
+    <!-- Step 2: Dedup Check -->
+    <rect x="170" y="175" width="120" height="70" class="component-box component-blue"/>
+    <text x="230" y="200" class="component-text-sm">Dedup Check</text>
+    <text x="230" y="218" class="component-text-sm" style="font-size:9px;opacity:0.7;">SHA-256 hash</text>
+    <text x="230" y="232" class="component-text-sm" style="font-size:9px;opacity:0.7;">+ semantic sim</text>
+
+    <line x1="290" y1="210" x2="320" y2="210" class="arrow" marker-end="url(#arrowhead3)"/>
+
+    <!-- Step 3: Conflict Resolution -->
+    <rect x="320" y="165" width="120" height="90" class="component-box component-purple"/>
+    <text x="380" y="190" class="component-text-sm" style="font-size:12px;">Conflict</text>
+    <text x="380" y="207" class="component-text-sm" style="font-size:12px;">Resolver</text>
+    <text x="380" y="228" class="component-text-sm" style="font-size:9px;opacity:0.7;">LLM-powered</text>
+    <text x="380" y="242" class="component-text-sm" style="font-size:9px;opacity:0.7;">decision</text>
+
+    <!-- Actions -->
+    <rect x="325" y="268" width="44" height="20" rx="4" fill="#238636"/>
+    <text x="347" y="280" class="component-text-sm" style="font-size:8px;">ADD</text>
+    <rect x="374" y="268" width="58" height="20" rx="4" fill="#1f6feb"/>
+    <text x="403" y="280" class="component-text-sm" style="font-size:8px;">UPDATE</text>
+    <rect x="325" y="293" width="55" height="20" rx="4" fill="#da3633"/>
+    <text x="352" y="305" class="component-text-sm" style="font-size:8px;">DELETE</text>
+    <rect x="385" y="293" width="50" height="20" rx="4" fill="#484f58"/>
+    <text x="410" y="305" class="component-text-sm" style="font-size:8px;">NOOP</text>
+
+    <line x1="440" y1="210" x2="475" y2="210" class="arrow" marker-end="url(#arrowhead3)"/>
+
+    <!-- Step 4: Encrypt -->
+    <rect x="475" y="180" width="100" height="60" class="component-box component-teal"/>
+    <text x="525" y="205" class="component-text-sm">Encrypt</text>
+    <text x="525" y="222" class="component-text-sm" style="font-size:9px;opacity:0.7;">AES-256</text>
+
+    <line x1="575" y1="210" x2="610" y2="210" class="arrow" marker-end="url(#arrowhead3)"/>
+
+    <!-- Step 5: Create Block -->
+    <rect x="610" y="170" width="120" height="80" class="component-box component-orange"/>
+    <text x="670" y="195" class="component-text">Create Block</text>
+    <text x="670" y="215" class="component-text-sm" style="font-size:9px;opacity:0.8;">blk_&lt;uuid&gt;</text>
+    <text x="670" y="230" class="component-text-sm" style="font-size:9px;opacity:0.8;">validate schema</text>
+
+    <line x1="730" y1="210" x2="765" y2="210" class="arrow" marker-end="url(#arrowhead3)"/>
+
+    <!-- Step 6: Persist + Log -->
+    <rect x="765" y="140" width="130" height="140" class="phase-bg"/>
+    <rect x="780" y="155" width="100" height="40" class="component-box component-green"/>
+    <text x="830" y="172" class="component-text-sm">Persist</text>
+    <text x="830" y="186" class="component-text-sm" style="font-size:9px;opacity:0.7;">to storage</text>
+
+    <rect x="780" y="205" width="100" height="40" class="component-box" style="fill:#da3633;"/>
+    <text x="830" y="222" class="component-text-sm">OpLog</text>
+    <text x="830" y="236" class="component-text-sm" style="font-size:9px;opacity:0.7;">hash chain</text>
+
+    <rect x="780" y="255" width="100" height="15" rx="4" fill="#21262d" stroke="#30363d" stroke-width="1"/>
+    <text x="830" y="264" class="component-text-sm" style="font-size:8px;fill:#8b949e;">fire hooks</text>
+
+    <line x1="895" y1="210" x2="930" y2="210" class="arrow" marker-end="url(#arrowhead3)"/>
+
+    <!-- Step 7: Embed -->
+    <rect x="930" y="175" width="110" height="70" class="component-box component-purple"/>
+    <text x="985" y="200" class="component-text-sm">Embed</text>
+    <text x="985" y="218" class="component-text-sm" style="font-size:9px;opacity:0.7;">OpenAI | Gemini</text>
+    <text x="985" y="232" class="component-text-sm" style="font-size:9px;opacity:0.7;">FastEmbed | Custom</text>
+
+    <line x1="1040" y1="210" x2="1075" y2="210" class="arrow" marker-end="url(#arrowhead3)"/>
+
+    <!-- Step 8: Auto-Link -->
+    <rect x="1075" y="175" width="110" height="70" class="component-box component-teal"/>
+    <text x="1130" y="200" class="component-text-sm">Auto-Link</text>
+    <text x="1130" y="218" class="component-text-sm" style="font-size:9px;opacity:0.7;">sequential +</text>
+    <text x="1130" y="232" class="component-text-sm" style="font-size:9px;opacity:0.7;">tag-based edges</text>
+
+    <line x1="1185" y1="210" x2="1210" y2="210" class="arrow" marker-end="url(#arrowhead3)"/>
+
+    <!-- Final: Block stored -->
+    <rect x="1210" y="180" width="70" height="60" rx="10" fill="#238636"/>
+    <text x="1245" y="210" class="component-text" style="font-size:20px;">&#10003;</text>
+    <text x="1245" y="225" class="component-text-sm" style="font-size:9px;">Done</text>
+
+    <!-- Optional: Auto-Extract branch -->
+    <line x1="670" y1="250" x2="670" y2="340" class="arrow-dashed" marker-end="url(#arrowhead3)"/>
+    <rect x="606" y="290" width="128" height="20" class="pill"/>
+    <text x="670" y="301" class="pill-text">if auto_extract</text>
+
+    <rect x="580" y="340" width="180" height="80" class="phase-bg"/>
+    <text x="670" y="360" class="component-text-sm" style="fill:#d29922;font-size:12px;">LLM Auto-Extraction</text>
+    <rect x="595" y="375" width="150" height="35" class="component-box component-purple"/>
+    <text x="670" y="393" class="component-text-sm">Extract & Store</text>
+    <text x="670" y="406" class="component-text-sm" style="font-size:9px;opacity:0.7;">DERIVED_FROM links</text>
+
+    <!-- Logo -->
+    <text x="40" y="450" class="logo-text" style="font-size:24px;">&#9646; memblock</text>
+    <text x="40" y="470" class="logo-sub" style="font-size:10px;">Typed block tree + knowledge graph memory SDK</text>
+  </svg>
+</div>
+
+</body>
+</html>
