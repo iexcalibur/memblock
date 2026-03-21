@@ -49,7 +49,7 @@ For each piece of knowledge found, output a JSON array of objects with these fie
 - "confidence": float 0.0-1.0 (how certain is this information)
 - "source": one of "explicit" (user directly stated), "inferred" (derived from context), "observed" (noticed from behavior)
 - "tags": list of relevant tags (1-3 short words)
-- "happened_at": ISO date/datetime when the event/fact occurred (if mentioned or inferable), null otherwise. For events, always try to extract the date. Use the conversation context to infer approximate dates.
+- "happened_at": ISO date/datetime when the event/fact occurred (if mentioned or inferable), null otherwise. For events, always try to extract the date. Use the conversation context to infer approximate dates. IMPORTANT: Always resolve relative dates ("last year", "last week", "yesterday", "two months ago") to absolute ISO dates using the conversation date as reference. Never store relative time references — always compute the actual date.
 - "temporal_precision": one of "exact", "day", "week", "month", "year", "approximate" — how precise the temporal information is
 - "subject": the main entity this memory is about (person name, place, organization, etc.), null if not applicable
 - "relations": list of objects {"target_content": "...", "relation": "supports|contradicts|about|related_to"} (optional connections between extracted memories)
@@ -71,6 +71,7 @@ Rules:
 7. For events, ALWAYS attempt to extract or infer a date (happened_at)
 8. Include the subject's name in fact and preference content so the memory is findable via search
 9. Extract separate blocks for separate facts — don't combine unrelated information
+10. When the content references a time, include the ABSOLUTE date in the content text itself (e.g., "Melanie painted a sunrise in 2022" not "Melanie painted a sunrise last year")
 
 Respond with ONLY the JSON array, no other text."""
 
