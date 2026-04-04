@@ -18,3 +18,5 @@ htmlcov/
 .DS_Store
 *.swp
 *.swo
+memblock-website/
+.claude/
