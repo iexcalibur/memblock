@@ -220,6 +220,137 @@ class CrossEncoderReranker(Reranker):
         return [b for b, _ in scored[:top_k]]
 
 
+class HeuristicReranker(Reranker):
+    """
+    Post-retrieval heuristic reranker — keyword overlap, quoted phrase
+    matching, and person name boosting.
+
+    Blends semantic ranking (preserved via input position) with lexical
+    heuristics that embedding models miss: exact keyword matches, quoted
+    phrases, and proper noun detection.
+
+    Zero external dependencies. Pure Python.
+
+    Usage:
+        mem = MemBlock(
+            storage="sqlite:///./memory.db",
+            embeddings=True,
+            reranker=HeuristicReranker(),
+        )
+    """
+
+    _STOP_WORDS = frozenset({
+        "what", "when", "where", "who", "how", "which", "did", "do",
+        "was", "were", "have", "has", "had", "is", "are", "the", "a",
+        "an", "my", "me", "i", "you", "your", "their", "it", "its",
+        "in", "on", "at", "to", "for", "of", "with", "by", "from",
+        "ago", "last", "that", "this", "there", "about", "get", "got",
+        "give", "gave", "buy", "bought", "made", "make", "said",
+        "and", "but", "not", "all", "can", "her", "his", "one", "our",
+        "out", "new", "now", "old", "see", "way", "too", "use", "yes",
+        "also", "been", "call", "come", "each", "just", "like", "much",
+        "must", "only", "over", "such", "take", "than", "them", "then",
+        "they", "very", "well", "will", "some", "would", "could",
+        "should", "shall", "may", "might", "been", "does", "going",
+        "think", "know", "want", "need", "tell", "told", "asked",
+        "something", "anything", "everything", "nothing", "someone",
+        "anyone", "everyone",
+    })
+
+    _NOT_NAMES = frozenset({
+        "What", "When", "Where", "Who", "How", "Which", "Did", "Do",
+        "Was", "Were", "Have", "Has", "Had", "Is", "Are", "The", "My",
+        "Our", "Their", "Can", "Could", "Would", "Should", "Will",
+        "Shall", "May", "Might", "Monday", "Tuesday", "Wednesday",
+        "Thursday", "Friday", "Saturday", "Sunday", "January",
+        "February", "March", "April", "June", "July", "August",
+        "September", "October", "November", "December", "In", "On",
+        "At", "For", "To", "Of", "With", "By", "From", "And", "But",
+        "It", "Its", "This", "That", "These", "Those", "Also", "Just",
+        "Very", "More", "Said", "Speaker", "Person", "Time", "Date",
+        "Year", "Day", "Previously", "Recently",
+    })
+
+    def __init__(
+        self,
+        keyword_weight: float = 0.50,
+        phrase_weight: float = 0.60,
+        name_weight: float = 0.20,
+    ) -> None:
+        """
+        Args:
+            keyword_weight: Max boost for keyword overlap (0-1 scale).
+            phrase_weight: Boost for quoted phrase exact match.
+            name_weight: Boost for person name match.
+        """
+        self._kw_weight = keyword_weight
+        self._phrase_weight = phrase_weight
+        self._name_weight = name_weight
+
+    @property
+    def name(self) -> str:
+        return "heuristic"
+
+    def rerank(self, query: str, blocks: list[Block], top_k: int = 10) -> list[Block]:
+        if not blocks or not query:
+            return blocks[:top_k]
+
+        keywords = self._extract_keywords(query)
+        phrases = self._extract_quoted_phrases(query)
+        names = self._extract_person_names(query)
+
+        scored = []
+        for rank, block in enumerate(blocks):
+            # Base score from semantic ranking (input order = pre-sorted)
+            base = 1.0 / (rank + 1)
+
+            text_lower = block.content.lower()
+
+            # Keyword overlap boost
+            kw_boost = 0.0
+            if keywords:
+                hits = sum(1 for kw in keywords if kw in text_lower)
+                kw_boost = (hits / len(keywords)) * self._kw_weight
+
+            # Quoted phrase boost
+            phrase_boost = 0.0
+            if phrases:
+                for p in phrases:
+                    if p.lower() in text_lower:
+                        phrase_boost = self._phrase_weight
+                        break
+
+            # Person name boost
+            name_boost = 0.0
+            if names:
+                hits = sum(1 for n in names if n.lower() in text_lower)
+                if hits:
+                    name_boost = min(hits / len(names), 1.0) * self._name_weight
+
+            total = base + kw_boost + phrase_boost + name_boost
+            scored.append((block, total))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [b for b, _ in scored[:top_k]]
+
+    def _extract_keywords(self, text: str) -> list[str]:
+        """Extract non-stopword tokens (3+ chars) from text."""
+        words = re.findall(r"\b[a-z]{3,}\b", text.lower())
+        return [w for w in words if w not in self._STOP_WORDS]
+
+    def _extract_quoted_phrases(self, text: str) -> list[str]:
+        """Extract quoted phrases from text."""
+        phrases = []
+        for pat in [r"'([^']{3,60})'", r'"([^"]{3,60})"']:
+            phrases.extend(re.findall(pat, text))
+        return [p.strip() for p in phrases if len(p.strip()) >= 3]
+
+    def _extract_person_names(self, text: str) -> list[str]:
+        """Extract likely person names (capitalized, not common words)."""
+        words = re.findall(r"\b([A-Z][a-z]{2,15})\b", text)
+        return list(set(w for w in words if w not in self._NOT_NAMES))
+
+
 class CallableReranker(Reranker):
     """
     Wrap any function as a reranker.
