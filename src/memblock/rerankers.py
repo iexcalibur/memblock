@@ -300,13 +300,15 @@ class HeuristicReranker(Reranker):
         names = self._extract_person_names(query)
 
         scored = []
+        n = len(blocks)
         for rank, block in enumerate(blocks):
-            # Base score from semantic ranking (input order = pre-sorted)
-            base = 1.0 / (rank + 1)
+            # Linear base preserves semantic ordering with gentle slope
+            # rank 0 → 1.0, last rank → 0.0 — smoother than 1/(rank+1)
+            base = 1.0 - (rank / max(n, 1))
 
             text_lower = block.content.lower()
 
-            # Keyword overlap boost
+            # Keyword overlap boost — multiplicative on distance
             kw_boost = 0.0
             if keywords:
                 hits = sum(1 for kw in keywords if kw in text_lower)

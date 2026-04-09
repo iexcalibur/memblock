@@ -189,7 +189,7 @@ class QueryEngine:
                 recency = max(0.0, 1.0 - (hours_since / (30 * 24)))
                 # Graph proximity boost
                 g_boost = graph_boost.get(block.id, 0.0)
-                return (sem * 0.50) + (conf * 0.25) + (strength * 0.15) + (recency * 0.10) + g_boost
+                return (sem * 0.70) + (conf * 0.10) + (strength * 0.05) + (recency * 0.05) + (g_boost * 0.10)
             scored.sort(key=relevance_score, reverse=True)
 
         # Step 5: Rerank first (on wider pool), THEN apply limit
