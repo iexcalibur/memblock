@@ -3,7 +3,7 @@
 Supports:
   - Local embeddings via fastembed (no API key, runs on CPU)
   - OpenAI text-embedding-3-small (API key required)
-  - Gemini text-embedding-004 (API key required)
+  - Gemini gemini-embedding-001 / gemini-embedding-2 (API key required)
   - Custom callable provider
 
 Install:
@@ -105,18 +105,37 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
 
 class GeminiEmbeddingProvider(EmbeddingProvider):
-    """Google Gemini embedding provider (text-embedding-004, gemini-embedding-2-preview, etc.)."""
+    """Google Gemini embedding provider.
 
-    # Known default dimensions per model
+    Supported models (all return 3072-dim vectors):
+      - gemini-embedding-001    (default, GA, recommended for most workloads)
+      - gemini-embedding-2      (newer GA model)
+      - gemini-embedding-2-preview (preview channel — may change)
+
+    Note: the prior-default `text-embedding-004` was removed by Google
+    in 2026 and now returns HTTP 404. Existing callers that hardcoded
+    that name should switch to `gemini-embedding-001`.
+    """
+
+    # Known default dimensions per model.
     _MODEL_DIMS: dict[str, int] = {
-        "text-embedding-004": 768,
+        "gemini-embedding-001": 3072,
+        "gemini-embedding-2": 3072,
         "gemini-embedding-2-preview": 3072,
+        # Legacy alias kept in the dict so existing callers that
+        # passed the old name still get a usable default. The actual
+        # API call will 404 — caller should migrate.
+        "text-embedding-004": 768,
     }
 
-    def __init__(self, api_key: str, model: str = "text-embedding-004") -> None:
+    def __init__(
+        self, api_key: str, model: str = "gemini-embedding-001",
+    ) -> None:
         self._api_key = api_key
         self._model = model
-        self._dims = self._MODEL_DIMS.get(model, 768)
+        # Default to 3072 (the dim of every current Gemini embedding
+        # model) when the user passes an unknown name.
+        self._dims = self._MODEL_DIMS.get(model, 3072)
 
     @property
     def dimensions(self) -> int:

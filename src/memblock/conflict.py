@@ -206,3 +206,82 @@ class ConflictResolver:
             ))
 
         return actions
+
+
+class AsyncConflictResolver(ConflictResolver):
+    """Async equivalent of `ConflictResolver`.
+
+    The provider's `complete()` method is sync (HTTP call); we wrap
+    it with `asyncio.to_thread` so the calling event loop stays
+    responsive while the LLM request is in flight. All parsing /
+    formatting logic is reused via inheritance — only the I/O entry
+    point (`resolve` -> `aresolve`) differs.
+
+    Used by `AsyncMemBlock`'s native-async `store()` path when
+    `conflict_resolution=True` is configured. Behaves identically to
+    the sync version: same prompts, same fallback behaviour on LLM
+    or parse failure.
+    """
+
+    async def aresolve(
+        self,
+        new_content: str,
+        existing_blocks: list[Block],
+    ) -> ConflictResult:
+        """Async equivalent of `resolve()`. Returns the same
+        `ConflictResult` shape.
+
+        Fallback semantics (LLM call fails OR response unparseable)
+        match the sync resolver: produce a single `ADD` action so
+        the caller's `store()` path falls through to a normal write.
+        """
+        import asyncio
+
+        result = ConflictResult()
+
+        if not existing_blocks:
+            result.actions.append(ConflictAction(
+                action=ConflictActionType.ADD,
+                new_content=new_content,
+                reason="No existing memories to conflict with",
+            ))
+            return result
+
+        existing_text = "\n".join(
+            f"- [ID: {b.id}] {b.content} (type: {b.type.value}, "
+            f"confidence: {b.metadata.confidence:.2f})"
+            for b in existing_blocks
+        )
+
+        user_prompt = CONFLICT_USER_TEMPLATE.format(
+            new_content=new_content,
+            existing_blocks=existing_text,
+        )
+
+        try:
+            # Wrap the sync HTTP call so it runs off the event loop.
+            raw_response = await asyncio.to_thread(
+                self.provider.complete, self.system_prompt, user_prompt,
+            )
+            result.raw_response = raw_response
+        except Exception as e:
+            result.errors.append(f"LLM call failed: {e}")
+            result.actions.append(ConflictAction(
+                action=ConflictActionType.ADD,
+                new_content=new_content,
+                reason="Fallback: LLM conflict resolution failed",
+            ))
+            return result
+
+        try:
+            actions = self._parse_response(raw_response, existing_blocks)
+            result.actions = actions
+        except Exception as e:
+            result.errors.append(f"Parse failed: {e}")
+            result.actions.append(ConflictAction(
+                action=ConflictActionType.ADD,
+                new_content=new_content,
+                reason="Fallback: could not parse LLM response",
+            ))
+
+        return result

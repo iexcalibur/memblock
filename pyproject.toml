@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memblock"
-version = "0.9.1"
+version = "0.10.0"
 description = "Typed block tree + knowledge graph memory SDK for AI agents"
 readme = "README.md"
 license = {text = "Proprietary"}
@@ -34,7 +34,16 @@ Repository = "https://github.com/iexcalibur/memblock"
 "Bug Tracker" = "https://github.com/iexcalibur/memblock/issues"
 
 [project.optional-dependencies]
-postgres = ["psycopg[binary]>=3.1"]
+# `postgres` ships BOTH drivers — psycopg (sync) and asyncpg (native
+# async) — plus pgvector. One install covers `MemBlock`,
+# `AsyncMemBlock` with `postgresql://` (legacy), and `AsyncMemBlock`
+# with `postgresql+asyncpg://` (native). The 3MB asyncpg overhead is
+# trivial compared to the choice burden of picking the right extra.
+postgres = [
+    "psycopg[binary]>=3.1",
+    "asyncpg>=0.29",
+    "pgvector>=0.3",
+]
 pool = ["psycopg_pool>=3.1"]
 pgvector = ["pgvector>=0.3"]
 tokens = ["tiktoken>=0.5"]
@@ -66,8 +75,11 @@ all = [
 ]
 dev = [
     "pytest>=7.0",
+    "pytest-asyncio>=0.21",
     "pytest-cov>=4.0",
     "psycopg[binary]>=3.1",
+    "asyncpg>=0.29",
+    "pgvector>=0.3",
 ]
 
 [project.scripts]
@@ -79,3 +91,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# `asyncio_mode = "auto"` lets us write `async def test_*` directly
+# without a per-test `@pytest.mark.asyncio` decorator. Existing sync
+# tests that use `asyncio.run(_test())` are unaffected.
+asyncio_mode = "auto"

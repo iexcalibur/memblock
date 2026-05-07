@@ -114,7 +114,7 @@ class MemBlock:
                 - False: FTS only (default, no extra deps)
                 - True: Local embeddings via FastEmbed (pip install memblock[embeddings])
                 - "openai": OpenAI text-embedding-3-small (requires embeddings_api_key)
-                - "gemini": Gemini text-embedding-004 (requires embeddings_api_key)
+                - "gemini": Gemini gemini-embedding-001 (requires embeddings_api_key)
             embeddings_api_key: API key for OpenAI/Gemini embedding providers.
             embeddings_model: Override the default embedding model name.
             on_duplicate: Deduplication policy. None = no dedup (default).
@@ -313,7 +313,7 @@ class MemBlock:
                 from memblock.embeddings import GeminiEmbeddingProvider
                 return GeminiEmbeddingProvider(
                     api_key=api_key,
-                    model=model or "text-embedding-004",
+                    model=model or "gemini-embedding-001",
                 )
             else:
                 raise ValueError(

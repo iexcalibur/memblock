@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.10.0
+
+### Added
+- **Native asyncpg backend**: New `postgresql+asyncpg://` URL scheme for `AsyncMemBlock` runs storage I/O directly on `asyncpg` — no `asyncio.to_thread` wrapping. Full parity with the sync `MemBlock`: store, get, update, delete, query, build_context, link/unlink, neighbors, traverse, prune, strongest/weakest, verify, sessions, multi_hop_query, analytics. Same op-log hash chain, same pgvector dual-write strategy.
+  ```python
+  mem = AsyncMemBlock(storage="postgresql+asyncpg://user@host/db")
+  ```
+- **`AsyncPostgreSQLAdapter`**: `asyncpg.Pool`-backed adapter with `pgvector.asyncpg` codec registration. HNSW/IVFFlat index strategy auto-selected by embedding dimension.
+- **`AsyncQueryEngine`**: native-async hybrid FTS + vector search with weighted RRF merging, graph-proximity boost, and concurrent BFS traversal via `asyncio.gather`.
+- **`AsyncContextBuilder`**: native-async equivalent of `ContextBuilder` with all four strategies (`relevance`, `graph_walk`, `type_grouped`, `adaptive`).
+- **`AsyncConflictResolver`**: native-async `aresolve()` for LLM-driven ADD/UPDATE/DELETE/NONE decisions.
+- **`schema=` parameter**: `AsyncMemBlock(storage=..., schema='tenant_xyz')` bootstraps a custom Postgres schema on first use and keeps every write inside it. Drop the schema to clean up — `public` is untouched. Enables multi-tenant isolation without separate databases.
+- **Hooks in async CRUD**: native `store`/`update`/`delete`/`query` emit `EventType.ON_ADD`/`ON_UPDATE`/`ON_DELETE`/`ON_QUERY` to registered callbacks (sync or async). Same lifecycle as sync `MemBlock`.
+- **Async background extraction**: `AsyncMemBlock(auto_extract_on_store=True, background_extract=True)` schedules extraction via `asyncio.create_task` and tracks tasks for clean shutdown.
+- **Test coverage**: 30 new tests in `tests/test_async_native.py` (URL detection, CRUD, query/FTS, edges, op-log, schema isolation, hooks). `pytest-asyncio` auto-mode configured in `pyproject.toml`.
+
+### Changed
+- **`[postgres]` extra now bundles both drivers**: `pip install "memblock[postgres]"` now installs `psycopg[binary]>=3.1` *and* `asyncpg>=0.29` *and* `pgvector>=0.3` — one extra covers `MemBlock`, `AsyncMemBlock` (legacy URL), and `AsyncMemBlock` (native URL). Previously `[postgres]` was sync-only.
+- **`AsyncPostgreSQLAdapter.initialize()` creates the schema if missing**: `CREATE SCHEMA IF NOT EXISTS` runs before table DDL when `schema != "public"` so users can pass any custom schema name without pre-provisioning.
+
+### Fixed
+- **FTS trigger silently skipped on non-public schemas**: the `IF NOT EXISTS` check on `pg_trigger.tgname` is global per database, so once `public.memblock_blocks` had the trigger, every other schema short-circuited and ended up with `content_tsv` permanently NULL — breaking full-text search. Trigger existence check is now scoped to `tgrelid = '{schema}.memblock_blocks'::regclass`.
+- **`AsyncMemBlockPool.get()` regression**: the pool builds `AsyncMemBlock` via `__new__()` to wrap an existing sync instance, which bypassed `__init__`. The newly-added `_native_async` attribute was never set, so every CRUD method on a pooled wrapper raised `AttributeError`. Pool now sets `_native_async = False` after `__new__`.
+- **`tests/test_cli.py::test_version_output`**: hardcoded `"0.4.0"` assertion (stale across many releases) replaced with dynamic `__version__` check.
+
 ## v0.6.1
 
 ### Added

@@ -691,43 +691,101 @@ class PostgreSQLAdapter(StorageAdapter):
 
     # ─── Embedding Operations ────────────────────────────────────────────
 
+    # pgvector HNSW indexes have a hard 2000-dim limit. Embeddings
+    # above that ceiling (e.g. Gemini's `gemini-embedding-001` at 3072
+    # dims) need IVFFlat instead, which has no upper bound. We pick
+    # the index strategy based on the embedding dimension at the
+    # first save_embedding() call.
+    _HNSW_MAX_DIMS = 2000
+
     def _ensure_pgvector_index(self, dims: int) -> None:
-        """Create HNSW index on pgvector table once dimensions are known."""
+        """Create the right vector index on the pgvector table once
+        dimensions are known.
+
+        - dims <= 2000  -> HNSW (better recall, supported up to 2000)
+        - dims > 2000   -> IVFFlat (no upper bound; slightly slower
+                                     recall but still fast enough)
+
+        Idempotent: re-running for the same dimension is a no-op.
+        Failures are caught and rolled back so the calling
+        transaction stays clean — index creation is a perf hint,
+        not a correctness requirement.
+        """
         if self._embedding_dims is not None:
             return
         self._embedding_dims = dims
-        with self.conn.cursor() as cur:
-            cur.execute(f"""
-                CREATE INDEX IF NOT EXISTS idx_mb_embeddings_vec_hnsw
-                ON {self.schema}.memblock_embeddings_vec
-                USING hnsw (embedding vector_cosine_ops)
-            """)
-        self.conn.commit()
+
+        index_type = "hnsw" if dims <= self._HNSW_MAX_DIMS else "ivfflat"
+        index_name = f"idx_mb_embeddings_vec_{index_type}"
+        try:
+            with self.conn.cursor() as cur:
+                if index_type == "hnsw":
+                    cur.execute(f"""
+                        CREATE INDEX IF NOT EXISTS {index_name}
+                        ON {self.schema}.memblock_embeddings_vec
+                        USING hnsw (embedding vector_cosine_ops)
+                    """)
+                else:
+                    # IVFFlat needs a `lists` parameter. ~sqrt(rows)
+                    # is the rule of thumb; we don't know row count
+                    # at index-creation time so use a sensible default
+                    # (100). Postgres docs note this isn't critical —
+                    # rebuild later if recall becomes an issue.
+                    cur.execute(f"""
+                        CREATE INDEX IF NOT EXISTS {index_name}
+                        ON {self.schema}.memblock_embeddings_vec
+                        USING ivfflat (embedding vector_cosine_ops)
+                        WITH (lists = 100)
+                    """)
+            self.conn.commit()
+        except Exception:
+            # Roll back the failed CREATE INDEX so subsequent
+            # statements on this connection don't see "current
+            # transaction is aborted". Don't re-raise: vector index
+            # is a performance hint, not a correctness requirement.
+            # The cosine_similarity fallback (computed in Python over
+            # the BYTEA table) still works.
+            self.conn.rollback()
+            # Reset the cached dim so we'll retry later if conditions change.
+            self._embedding_dims = None
 
     def save_embedding(self, block_id: str, embedding: bytes) -> None:
-        # Always write to BYTEA table (backward compat)
-        with self.conn.cursor() as cur:
-            cur.execute(f"""
-                INSERT INTO {self.schema}.memblock_embeddings (block_id, user_id, embedding)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (block_id, user_id) DO UPDATE SET embedding = EXCLUDED.embedding
-            """, (block_id, self.user_id, embedding))
-        self.conn.commit()
+        # Always write to BYTEA table (backward compat).
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(f"""
+                    INSERT INTO {self.schema}.memblock_embeddings (block_id, user_id, embedding)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (block_id, user_id) DO UPDATE SET embedding = EXCLUDED.embedding
+                """, (block_id, self.user_id, embedding))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
-        # Dual-write to pgvector table if available
+        # Dual-write to pgvector table if available. Failures here
+        # MUST NOT poison the connection — the BYTEA write above is
+        # the source of truth for cosine_similarity fallback. Wrap
+        # with try/rollback so the caller's transaction stays clean.
         if self._has_pgvector:
             from memblock.embeddings import unpack_embedding
             vec = unpack_embedding(embedding)
             self._ensure_pgvector_index(len(vec))
-            with self.conn.cursor() as cur:
-                cur.execute(f"""
-                    INSERT INTO {self.schema}.memblock_embeddings_vec
-                        (block_id, user_id, embedding)
-                    VALUES (%s, %s, %s::vector)
-                    ON CONFLICT (block_id, user_id)
-                    DO UPDATE SET embedding = EXCLUDED.embedding
-                """, (block_id, self.user_id, str(vec)))
-            self.conn.commit()
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute(f"""
+                        INSERT INTO {self.schema}.memblock_embeddings_vec
+                            (block_id, user_id, embedding)
+                        VALUES (%s, %s, %s::vector)
+                        ON CONFLICT (block_id, user_id)
+                        DO UPDATE SET embedding = EXCLUDED.embedding
+                    """, (block_id, self.user_id, str(vec)))
+                self.conn.commit()
+            except Exception:
+                # Roll back so the next operation on this connection
+                # sees a clean transaction state. The BYTEA path
+                # already committed, so cosine_similarity still works.
+                self.conn.rollback()
 
     def get_embedding(self, block_id: str) -> bytes | None:
         with self.conn.cursor() as cur:

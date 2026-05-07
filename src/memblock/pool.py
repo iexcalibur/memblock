@@ -121,6 +121,11 @@ class AsyncMemBlockPool:
         sync_inst = await asyncio.to_thread(self._pool.get, user_id, **overrides)
         wrapper = AsyncMemBlock.__new__(AsyncMemBlock)
         wrapper._mem = sync_inst
+        # `__new__` bypasses `__init__`, so `_native_async` (added in
+        # v0.10.0) wouldn't otherwise be set — every async method
+        # checks it. Pool always wraps a sync `MemBlock`, so the
+        # wrapper is always in legacy mode.
+        wrapper._native_async = False
         return wrapper
 
     async def remove(self, user_id: str) -> None:

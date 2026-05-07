@@ -39,10 +39,30 @@ mem.link(results[0].id, other.id, relation="related_to")
 mem.verify()
 ```
 
+## Async (asyncio)
+
+```python
+from memblock import AsyncMemBlock, BlockType
+
+# Native asyncpg path — non-blocking storage I/O
+mem = AsyncMemBlock(storage="postgresql+asyncpg://user@host/db")
+
+await mem.store("User prefers Python", type=BlockType.PREFERENCE)
+results = await mem.query(text_search="programming", limit=10)
+
+# Multi-tenant isolation: each tenant gets its own Postgres schema.
+mem = AsyncMemBlock(
+    storage="postgresql+asyncpg://user@host/db",
+    schema="tenant_xyz",  # bootstraps + isolates on first use
+)
+```
+
+`AsyncMemBlock` accepts plain `postgresql://` URLs too — those use the legacy thread-pool wrapper. Use `postgresql+asyncpg://` to opt into the native async backend.
+
 ## Optional Extras
 
 ```bash
-pip install "memblock[postgres]"            # PostgreSQL backend
+pip install "memblock[postgres]"            # PostgreSQL backend (sync + async + pgvector)
 pip install "memblock[embeddings]"          # Local vector embeddings (FastEmbed)
 pip install "memblock[llm]"                 # LLM extraction (OpenAI, Anthropic, Gemini)
 pip install "memblock[reranker-cohere]"     # Cohere reranker

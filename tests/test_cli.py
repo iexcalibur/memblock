@@ -50,11 +50,14 @@ class TestInit:
 
 class TestVersion:
     def test_version_output(self, capsys):
+        from memblock import __version__
         rc = main(["version"])
         assert rc == 0
         out = capsys.readouterr().out
         assert "memblock" in out
-        assert "0.4.0" in out
+        # Assert against the actual `__version__` rather than a
+        # hardcoded string so the test moves with version bumps.
+        assert __version__ in out
 
 
 class TestQuery:
