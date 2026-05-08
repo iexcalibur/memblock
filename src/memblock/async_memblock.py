@@ -384,7 +384,7 @@ class AsyncMemBlock:
         tags: list[str] | None = None,
         parent_id: str | None = None,
         encryption_level: EncryptionLevel = EncryptionLevel.NONE,
-        decay_rate: float = 0.01,
+        decay_rate: float | None = None,
         ttl: int | None = None,
         session_id: str | None = None,
         org_id: str | None = None,
@@ -397,6 +397,11 @@ class AsyncMemBlock:
     ) -> Block | None:
         """Store a new memory block.
 
+        `decay_rate=None` (default) picks a type-specific rate from
+        `memblock.decay.DEFAULT_DECAY_BY_TYPE`:
+        ENTITY=0.001, FACT=0.005, RELATION=0.005, PREFERENCE=0.020,
+        EVENT=0.040. Pass an explicit float to override.
+
         In native-async mode: runs conflict resolution (if enabled),
         dedup check, encryption, persistent block + metadata write,
         op-log append, embedding generation, auto-link edge writes,
@@ -405,6 +410,11 @@ class AsyncMemBlock:
 
         In legacy mode: delegates to `MemBlock.store` via to_thread.
         """
+        # Resolve per-type decay default when caller didn't override.
+        if decay_rate is None:
+            from memblock.decay import default_decay_rate_for
+            decay_rate = default_decay_rate_for(type)
+
         if not self._native_async:
             return await asyncio.to_thread(
                 self._mem.store,
@@ -1603,8 +1613,19 @@ class AsyncMemBlock:
     async def _auto_link_block_async(
         self, block: Block, tags: list[str] | None,
     ) -> None:
-        """Sequential + tag-based auto-link, mirror of
-        `MemBlock._auto_link_block`."""
+        """Sequential + tag-based + semantic-similarity auto-link.
+
+        Three edge sources, from cheapest to most expensive:
+          1. Sequential RELATED_TO to the previously-stored block.
+          2. Tag-based RELATED_TO to recent blocks sharing tags.
+          3. Semantic-similarity RELATED_TO to the top-K nearest
+             neighbours by embedding (when embeddings are configured).
+
+        v0.11.0 added (3) — without it the graph stays sparse and
+        multi-hop walks miss semantically-related but tag-disjoint
+        blocks (e.g., two blocks about "tax" written before a `tax`
+        tag was introduced).
+        """
         if not self._auto_link_enabled:
             return
 
@@ -1648,6 +1669,47 @@ class AsyncMemBlock:
                 self._tag_index.setdefault(tag, []).append(block.id)
                 if len(self._tag_index[tag]) > 50:
                     self._tag_index[tag] = self._tag_index[tag][-50:]
+
+        # 3. Semantic-similarity links (v0.11.0). Skipped when
+        # embeddings aren't configured; best-effort otherwise.
+        if self._embedding_provider is not None and self._async_storage is not None:
+            try:
+                emb_bytes = await self._async_storage.get_embedding(block.id)
+                if emb_bytes:
+                    # Pull top (max_neighbors + len(linked_ids) + 1)
+                    # similar embeddings so we can filter out the new
+                    # block itself + already-linked candidates and
+                    # still have N fresh links to add.
+                    fetch_n = self._auto_link_max_neighbors + len(linked_ids) + 1
+                    similar = await self._async_storage.search_similar_embeddings(
+                        emb_bytes, limit=fetch_n,
+                    )
+                    added_sem = 0
+                    for sim_id, sim_score in similar:
+                        if added_sem >= self._auto_link_max_neighbors:
+                            break
+                        if sim_id == block.id or sim_id in linked_ids:
+                            continue
+                        # Map cosine similarity (-1..1) to edge weight
+                        # (0.3..0.9); below 0.5 similarity is too weak
+                        # to bother edging.
+                        if sim_score < 0.5:
+                            continue
+                        weight = min(0.9, 0.3 + (sim_score - 0.5) * 1.2)
+                        try:
+                            await self.link(
+                                block.id, sim_id,
+                                relation=EdgeRelation.RELATED_TO,
+                                weight=weight,
+                            )
+                            linked_ids.add(sim_id)
+                            added_sem += 1
+                        except Exception:
+                            pass
+            except Exception:
+                # Embedding lookup or similarity search failure is
+                # non-fatal — auto-link is best-effort.
+                pass
 
         self._last_stored_id = block.id
 

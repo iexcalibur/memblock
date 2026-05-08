@@ -430,7 +430,7 @@ class MemBlock:
         tags: list[str] | None = None,
         parent_id: str | None = None,
         encryption_level: EncryptionLevel = EncryptionLevel.NONE,
-        decay_rate: float = 0.01,
+        decay_rate: float | None = None,
         ttl: int | None = None,
         session_id: str | None = None,
         org_id: str | None = None,
@@ -452,7 +452,11 @@ class MemBlock:
             tags: Categorization tags
             parent_id: Parent block ID for tree structure
             encryption_level: NONE, STANDARD, or SENSITIVE
-            decay_rate: How fast this memory fades (0 = never)
+            decay_rate: How fast this memory fades (0 = never).
+                When `None` (default), the SDK picks a type-specific
+                rate from `decay.DEFAULT_DECAY_BY_TYPE`:
+                ENTITY=0.001, FACT=0.005, RELATION=0.005,
+                PREFERENCE=0.020, EVENT=0.040.
             ttl: Time-to-live in seconds (None = permanent)
             session_id: Session scope (overrides default)
             org_id: Organization scope (overrides default)
@@ -463,6 +467,11 @@ class MemBlock:
         Returns:
             The created Block, or None if duplicate with SKIP policy.
         """
+        # Resolve per-type decay default when caller didn't override.
+        if decay_rate is None:
+            from memblock.decay import default_decay_rate_for
+            decay_rate = default_decay_rate_for(type)
+
         # Conflict resolution via LLM (if enabled)
         if (
             self._conflict_resolution

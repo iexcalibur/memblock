@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.11.0
+
+### Added
+- **Per-type decay defaults**: `MemBlock.store()` and `AsyncMemBlock.store()` now pick a sensible decay rate per `BlockType` when `decay_rate=None` (the new default). ENTITY blocks fade slowest (0.001), FACTs and RELATIONs slow (0.005), PREFERENCEs faster (0.020), EVENTs fastest (0.040). Reflects the durability of each kind of memory: named anchors don't change, opinions do. Caller-supplied floats still override. Tunable via `memblock.decay.DEFAULT_DECAY_BY_TYPE`.
+
+- **Semantic-similarity auto-link edges**: when `enable_auto_link()` is on AND embeddings are configured, `store()` now adds a 3rd source of `RELATED_TO` edges — top-K nearest neighbours by embedding cosine similarity (in addition to sequential and tag-based edges). Skips matches below 0.5 similarity to avoid noise. Closes the gap where two semantically-related blocks shared no tags and weren't sequential. Capped at `_auto_link_max_neighbors` per write, best-effort, and silently skipped when embeddings aren't available.
+
+- **Rule-based query expansion** (`memblock.query_expansion.expand_query`): a pure-regex helper that rewrites referential chat queries ("tell me more", "what about that", "compare them", "explain", "how does it work", etc.) using the most recent turn's content. Picks the longest capitalized noun phrase as the topic anchor, falls back to the longest lowercase noun phrase, returns the original query unchanged when no clear topic is found (never degrades a well-formed query). No LLM call, no extra cost, no extra latency. Designed for chat retrieval pipelines where vague follow-ups would otherwise return noise from semantic search.
+
+### Tests
+- 583 passing (was 558). New: `test_decay_per_type` (10 cases pinning the new defaults + override behaviour), `test_query_expansion` (15 cases covering referential detection, topic extraction, and "do not degrade well-formed queries").
+
+### LoCoMo benchmark — for context
+
+These v0.11.0 changes aren't visible on LoCoMo specifically (the benchmark uses fresh blocks so decay doesn't fire, doesn't enable auto-link, and asks well-formed questions so expansion doesn't apply). The proven LoCoMo numbers from v0.10.2 still hold:
+
+```
+                       Heuristic        BM25         Δ
+─────────────────────────────────────────────────────────
+  OVERALL recall          67.6%        90.2%      +22.6pp
+  perfect rate            62.7%        85.8%      +23.0pp
+  zero rate               27.5%         5.6%      -21.9pp
+─────────────────────────────────────────────────────────
+```
+
+The v0.11.0 additions help in production scenarios the benchmark doesn't cover: long-running deployments where decay matters, chat follow-ups where expansion fires, and graphs where dense semantic edges power multi-hop walks.
+
 ## v0.10.2
 
 ### Fixed

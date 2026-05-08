@@ -7,7 +7,43 @@ from datetime import datetime, timezone
 
 from memblock.block import Block
 from memblock.storage.base import StorageAdapter
-from memblock.types import now_utc
+from memblock.types import BlockType, now_utc
+
+
+# Per-type decay defaults — different block types fade at different
+# rates because they have different durability semantics:
+#   ENTITY      — named anchors (funds, people, places). Stable;
+#                 should almost never fade.
+#   FACT        — objective info ("user is 35"). Durable; slow decay.
+#   RELATION    — describes a relationship between entities. Same
+#                 durability profile as FACT.
+#   PREFERENCE  — opinions ("user prefers index funds"). People change
+#                 their minds; faster decay.
+#   EVENT       — point-in-time happenings ("user asked X yesterday").
+#                 Bounded relevance; fastest decay.
+#
+# Callers can still override per-block via `store(decay_rate=...)`.
+# These tables only kick in when the caller leaves it as the default.
+DEFAULT_DECAY_BY_TYPE: dict[BlockType, float] = {
+    BlockType.ENTITY:     0.001,
+    BlockType.FACT:       0.005,
+    BlockType.RELATION:   0.005,
+    BlockType.PREFERENCE: 0.020,
+    BlockType.EVENT:      0.040,
+}
+
+
+def default_decay_rate_for(block_type: BlockType | str) -> float:
+    """Return the per-type default decay rate. Falls back to FACT's
+    rate (0.005) for any unknown / non-enum input."""
+    if isinstance(block_type, str):
+        try:
+            block_type = BlockType(block_type)
+        except ValueError:
+            return DEFAULT_DECAY_BY_TYPE[BlockType.FACT]
+    return DEFAULT_DECAY_BY_TYPE.get(
+        block_type, DEFAULT_DECAY_BY_TYPE[BlockType.FACT],
+    )
 
 
 class DecayEngine:
