@@ -721,6 +721,8 @@ class MemBlock:
         min_confidence: float = 0.0,
         sort_by: str = "relevance",
         limit: int = 10,
+        include_decayed: bool = False,
+        min_strength: float = 0.0,
         semantic: bool = True,
         session_id: str | None = None,
         org_id: str | None = None,
@@ -739,6 +741,11 @@ class MemBlock:
             min_confidence: Minimum confidence threshold
             sort_by: 'relevance', 'recency', 'access_count', 'strength'
             limit: Maximum results
+            include_decayed: Include blocks below `min_strength` (default False)
+            min_strength: Minimum decayed-strength score (0.0-1.0) — filters
+                stale/low-confidence blocks at query time. Default 0.0
+                (off). Useful values: 0.1 to skip very weak blocks,
+                0.3 to focus on strong recent ones.
             semantic: Enable hybrid search when embeddings are available (default True)
             session_id: Filter by session (overrides default)
             org_id: Filter by organization (overrides default)
@@ -757,6 +764,8 @@ class MemBlock:
             min_confidence=min_confidence,
             sort_by=sort_by,
             limit=limit,
+            include_decayed=include_decayed,
+            min_strength=min_strength,
             semantic=semantic,
             session_id=session_id or self._session_id,
             org_id=org_id or self._org_id,

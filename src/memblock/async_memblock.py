@@ -287,11 +287,18 @@ class AsyncMemBlock:
         else:
             self._crypto = None
 
-        # ── Async query + context (lazy — both need storage initialized)
+        # ── Async query + context (lazy — both need storage initialized).
+        # Forward `reranker=` from kwargs so callers can pass any
+        # `Reranker` subclass (BM25Reranker / CohereReranker /
+        # CrossEncoderReranker / HeuristicReranker / CallableReranker).
+        # The query engine applies it best-effort after FTS+vector
+        # ranking when text_search is non-empty.
         self._async_query = AsyncQueryEngine(
             storage=self._async_storage,
             embedding_provider=self._embedding_provider,
+            reranker=kwargs.get("reranker"),
         )
+        self._reranker = kwargs.get("reranker")
         self._async_context = AsyncContextBuilder(
             storage=self._async_storage,
             query_engine=self._async_query,
@@ -793,6 +800,8 @@ class AsyncMemBlock:
         min_confidence: float = 0.0,
         sort_by: str = "relevance",
         limit: int = 10,
+        include_decayed: bool = False,
+        min_strength: float = 0.0,
         semantic: bool = True,
         session_id: str | None = None,
         org_id: str | None = None,
@@ -805,7 +814,9 @@ class AsyncMemBlock:
                 self._mem.query,
                 type=type, tags=tags, text_search=text_search,
                 related_to=related_to, min_confidence=min_confidence,
-                sort_by=sort_by, limit=limit, semantic=semantic,
+                sort_by=sort_by, limit=limit,
+                include_decayed=include_decayed, min_strength=min_strength,
+                semantic=semantic,
                 session_id=session_id, org_id=org_id,
                 project_id=project_id, agent_id=agent_id,
                 metadata_filters=metadata_filters,
@@ -814,7 +825,9 @@ class AsyncMemBlock:
         results = await self._async_query.query(
             type=type, tags=tags, text_search=text_search,
             related_to=related_to, min_confidence=min_confidence,
-            sort_by=sort_by, limit=limit, semantic=semantic,
+            sort_by=sort_by, limit=limit,
+            include_decayed=include_decayed, min_strength=min_strength,
+            semantic=semantic,
             session_id=session_id or self._session_id,
             org_id=org_id or self._org_id,
             project_id=project_id or self._project_id,

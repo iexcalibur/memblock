@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.10.1
+
+### Fixed
+- **Native-mode reranker wiring**: `AsyncMemBlock(storage="postgresql+asyncpg://...", reranker=...)` now correctly forwards the reranker into `AsyncQueryEngine`. v0.10.0 accepted the `reranker=` kwarg silently but never wired it through in native-async mode, so reranking only worked for the legacy `to_thread` path. Any of `BM25Reranker`, `CohereReranker`, `CrossEncoderReranker`, `HeuristicReranker`, or `CallableReranker` now work uniformly across both modes.
+
+### Added
+- **`min_strength` and `include_decayed` query params** on both `MemBlock.query()` and `AsyncMemBlock.query()`. Lets callers filter out blocks below a decay-adjusted strength threshold at query time (not just at `prune()` time). Defaults preserve old behaviour (`min_strength=0.0`, `include_decayed=False`).
+  ```python
+  # Surface only strong recent memories
+  blocks = await mem.query(text_search="retirement", min_strength=0.3)
+  ```
+
 ## v0.10.0
 
 ### Added

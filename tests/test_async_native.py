@@ -155,6 +155,61 @@ class TestNativeQuery:
         scoped = await mb_native.query(session_id=sess, limit=10)
         assert {b.content for b in scoped} == {"scoped"}
 
+    async def test_min_strength_filter_passes_through(
+        self, mb_native: AsyncMemBlock,
+    ):
+        """v0.10.1 wired `min_strength` + `include_decayed` into the
+        native query path. Smoke that the params pass through without
+        raising and that the filter actually runs (sufficient blocks
+        return when threshold is 0; threshold of 1.0 should return 0
+        unless we have a perfect-strength block)."""
+        await mb_native.store("strength filter test", type=BlockType.FACT)
+
+        all_hits = await mb_native.query(
+            text_search="strength filter", min_strength=0.0, limit=5,
+        )
+        assert any(b.content == "strength filter test" for b in all_hits)
+
+        # min_strength=1.0 is the highest possible — nothing should
+        # qualify on a fresh block (calculate_strength returns
+        # something less than 1 for new blocks).
+        strict_hits = await mb_native.query(
+            text_search="strength filter", min_strength=1.01, limit=5,
+        )
+        assert len(strict_hits) == 0
+
+
+class TestNativeReranker:
+    """v0.10.1 wired the `reranker=` kwarg through `_init_native`."""
+
+    async def test_construct_with_reranker_kwarg(
+        self, postgres_async_url: str, fresh_schema: str,
+    ):
+        """`AsyncMemBlock(storage='postgresql+asyncpg://...',
+        reranker=...)` should forward the reranker into the
+        underlying `AsyncQueryEngine` instead of dropping it."""
+        from memblock.rerankers import HeuristicReranker
+
+        rr = HeuristicReranker()
+        mb = AsyncMemBlock(
+            storage=postgres_async_url,
+            embeddings=False,
+            extract=False,
+            schema=fresh_schema,
+            reranker=rr,
+        )
+        try:
+            # The AsyncQueryEngine instance should hold the reranker.
+            await mb.store("reranker wiring smoke", type=BlockType.FACT)
+            engine = mb._async_query
+            assert engine is not None
+            assert engine._reranker is rr
+        finally:
+            try:
+                await mb.close()
+            except Exception:
+                pass
+
 
 # ─── Live-DB Edges ───────────────────────────────────────────────────
 
