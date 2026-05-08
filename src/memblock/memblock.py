@@ -482,7 +482,9 @@ class MemBlock:
                     if self._conflict_resolver is None:
                         extractor_provider = self._init_extractor().provider
                         self._conflict_resolver = ConflictResolver(provider=extractor_provider)
-                    result = self._conflict_resolver.resolve(content, similar)
+                    result = self._conflict_resolver.resolve(
+                        content, similar, new_block_type=type,
+                    )
                     for action in result.actions:
                         if action.action == ConflictActionType.UPDATE and action.block_id:
                             self.update(action.block_id, content=action.new_content or content)

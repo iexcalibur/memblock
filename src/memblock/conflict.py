@@ -102,6 +102,7 @@ class ConflictResolver:
         self,
         new_content: str,
         existing_blocks: list[Block],
+        new_block_type: Any = None,
     ) -> ConflictResult:
         """
         Resolve conflicts between new content and existing blocks.
@@ -109,6 +110,12 @@ class ConflictResolver:
         Args:
             new_content: The new information to evaluate
             existing_blocks: Top-K semantically similar existing blocks
+            new_block_type: Optional `BlockType` (or its string value)
+                of the block being stored. When provided, UPDATE/DELETE
+                actions targeting blocks of a *different* type are
+                rejected — preventing the resolver from silently
+                merging a FACT write into an ENTITY block (or vice
+                versa) just because their content overlaps textually.
 
         Returns:
             ConflictResult with a list of ConflictActions.
@@ -149,7 +156,10 @@ class ConflictResolver:
             return result
 
         try:
-            actions = self._parse_response(raw_response, existing_blocks)
+            actions = self._parse_response(
+                raw_response, existing_blocks,
+                new_block_type=new_block_type,
+            )
             result.actions = actions
         except Exception as e:
             result.errors.append(f"Parse failed: {e}")
@@ -165,8 +175,15 @@ class ConflictResolver:
         self,
         raw: str,
         existing_blocks: list[Block],
+        new_block_type: Any = None,
     ) -> list[ConflictAction]:
-        """Parse the LLM response into ConflictActions."""
+        """Parse the LLM response into ConflictActions.
+
+        When `new_block_type` is provided, UPDATE/DELETE actions
+        targeting blocks of a different type are silently dropped —
+        the resolver can only mutate same-type matches. This is the
+        Phase-fix for the cross-type conflation bug.
+        """
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
@@ -186,7 +203,21 @@ class ConflictResolver:
         if not isinstance(parsed, list):
             return []
 
-        valid_ids = {b.id for b in existing_blocks}
+        # Build lookup tables: id -> block (for type checks) and the
+        # set of valid ids the resolver is allowed to reference.
+        by_id = {b.id: b for b in existing_blocks}
+        valid_ids = set(by_id.keys())
+
+        # Normalize new_block_type to a string (BlockType.value) for
+        # comparison with the candidate block's type.
+        target_type_str: str | None = None
+        if new_block_type is not None:
+            target_type_str = (
+                new_block_type.value
+                if hasattr(new_block_type, "value")
+                else str(new_block_type)
+            )
+
         actions: list[ConflictAction] = []
 
         for item in parsed:
@@ -197,6 +228,22 @@ class ConflictResolver:
             if action_type in (ConflictActionType.UPDATE, ConflictActionType.DELETE):
                 if block_id not in valid_ids:
                     continue  # Skip invalid references
+
+                # Type-scoped guard — reject cross-type UPDATE/DELETE.
+                # The resolver's LLM gets candidates regardless of
+                # type (semantic similarity is type-agnostic), so a
+                # FACT write can be told to UPDATE an ENTITY block.
+                # That's never correct; demote to ADD by skipping.
+                if target_type_str is not None:
+                    target_block = by_id.get(block_id)
+                    target_type = (
+                        target_block.type.value
+                        if target_block is not None
+                        and hasattr(target_block.type, "value")
+                        else None
+                    )
+                    if target_type and target_type != target_type_str:
+                        continue  # Cross-type — drop this action
 
             actions.append(ConflictAction(
                 action=action_type,
@@ -227,9 +274,13 @@ class AsyncConflictResolver(ConflictResolver):
         self,
         new_content: str,
         existing_blocks: list[Block],
+        new_block_type: Any = None,
     ) -> ConflictResult:
         """Async equivalent of `resolve()`. Returns the same
         `ConflictResult` shape.
+
+        `new_block_type` enables the type-scoped guard — see the
+        sync `resolve()` docstring for details.
 
         Fallback semantics (LLM call fails OR response unparseable)
         match the sync resolver: produce a single `ADD` action so
@@ -274,7 +325,10 @@ class AsyncConflictResolver(ConflictResolver):
             return result
 
         try:
-            actions = self._parse_response(raw_response, existing_blocks)
+            actions = self._parse_response(
+                raw_response, existing_blocks,
+                new_block_type=new_block_type,
+            )
             result.actions = actions
         except Exception as e:
             result.errors.append(f"Parse failed: {e}")

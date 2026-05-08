@@ -83,7 +83,12 @@ class MultiHopRetriever:
         # Hop 0: Extract entities from the question itself
         question_entities = self._extract_entities_from_text(query)
 
-        # Hop 1: Standard retrieval (broader initial search)
+        # Hop 1: Standard retrieval (broader initial pool). Score with
+        # Reciprocal Rank weighting so we preserve the engine's
+        # relevance ordering — without this, all hop1 blocks collapse
+        # to a near-identical `strength + 1.0` and the tiebreak falls
+        # through to `decay.calculate_strength`'s recency component,
+        # silently discarding semantic relevance.
         hop1_blocks = self._query.query(
             text_search=query,
             sort_by="relevance",
@@ -92,11 +97,15 @@ class MultiHopRetriever:
         )
         result.hops_used = 1
 
-        for block in hop1_blocks:
+        for rank, block in enumerate(hop1_blocks):
             if block.id not in seen_ids:
                 seen_ids.add(block.id)
+                rr = 1.0 / (rank + 1.0)            # 1.0, 0.5, 0.33...
                 strength = self._decay.calculate_strength(block)
-                all_scored.append((block, strength + 1.0))  # bonus for direct match
+                # `2.0` keeps hop1 above hop2/hop3; `rr` preserves
+                # relevance order; `strength * 0.05` is a tiny tie
+                # tiebreaker so decay doesn't dominate.
+                all_scored.append((block, 2.0 + rr + strength * 0.05))
 
         if not hop1_blocks:
             # Even with no hop1 results, try question entities
@@ -108,11 +117,14 @@ class MultiHopRetriever:
                         limit=limit,
                         **scope,
                     )
-                    for block in entity_blocks:
+                    for rank, block in enumerate(entity_blocks):
                         if block.id not in seen_ids:
                             seen_ids.add(block.id)
+                            rr = 1.0 / (rank + 1.0)
                             strength = self._decay.calculate_strength(block)
-                            all_scored.append((block, strength + 0.8))
+                            all_scored.append(
+                                (block, 1.5 + rr + strength * 0.05),
+                            )
             if not all_scored:
                 result.blocks = []
                 return result
@@ -131,13 +143,15 @@ class MultiHopRetriever:
                 limit=limit,
                 **scope,
             )
-            for block in entity_blocks:
+            base = 1.0 if entity in question_entities else 0.7
+            for rank, block in enumerate(entity_blocks):
                 if block.id not in seen_ids:
                     seen_ids.add(block.id)
+                    rr = 1.0 / (rank + 1.0)
                     strength = self._decay.calculate_strength(block)
-                    # Higher bonus for question entities vs block entities
-                    bonus = 0.8 if entity in question_entities else 0.5
-                    all_scored.append((block, strength + bonus))
+                    all_scored.append(
+                        (block, base + rr + strength * 0.05),
+                    )
 
         # Hop 3: Walk graph from all retrieved blocks (deeper traversal)
         result.hops_used = 3

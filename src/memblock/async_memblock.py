@@ -442,7 +442,7 @@ class AsyncMemBlock:
                             provider=provider,
                         )
                     result = await self._async_conflict_resolver.aresolve(
-                        content, similar,
+                        content, similar, new_block_type=type,
                     )
                     for action in result.actions:
                         if (action.action == ConflictActionType.UPDATE
@@ -1225,16 +1225,25 @@ class AsyncMemBlock:
         # Hop 0: extract entities from the question itself
         question_entities = _extract_entities_from_text(query)
 
-        # Hop 1: hybrid retrieval
+        # Hop 1: hybrid retrieval. We preserve the underlying engine's
+        # relevance ranking by weighting hop1 results with `1/(rank+1)`
+        # (Reciprocal Rank). Without this, all hop1 blocks would get a
+        # near-identical `strength + 1.0` score, and the subsequent
+        # tie-break would fall through to `decay.calculate_strength`'s
+        # recency component — silently discarding semantic relevance.
         hop1 = await self._async_query.query(
             text_search=query, sort_by="relevance",
             limit=limit * 3, **scope,
         )
-        for block in hop1:
+        for rank, block in enumerate(hop1):
             if block.id not in seen_ids:
                 seen_ids.add(block.id)
+                rr = 1.0 / (rank + 1.0)            # 1.0, 0.5, 0.33, ...
                 strength = decay.calculate_strength(block)
-                all_scored.append((block, strength + 1.0))
+                # `2.0` keeps hop1 above hop2/hop3 contributions; `rr`
+                # preserves relevance order; `strength * 0.05` keeps
+                # decay as a tiny tiebreaker, not the dominant signal.
+                all_scored.append((block, 2.0 + rr + strength * 0.05))
 
         if not hop1 and question_entities:
             # Fallback — use question entities directly
@@ -1246,11 +1255,12 @@ class AsyncMemBlock:
                 for ent in question_entities[:3]
             ])
             for blocks in entity_results:
-                for block in blocks:
+                for rank, block in enumerate(blocks):
                     if block.id not in seen_ids:
                         seen_ids.add(block.id)
+                        rr = 1.0 / (rank + 1.0)
                         strength = decay.calculate_strength(block)
-                        all_scored.append((block, strength + 0.8))
+                        all_scored.append((block, 1.5 + rr + strength * 0.05))
             if not all_scored:
                 return []
 
@@ -1267,12 +1277,17 @@ class AsyncMemBlock:
                 for ent in all_entities[:10]
             ])
             for ent, blocks in zip(all_entities[:10], entity_results):
-                bonus = 0.8 if ent in question_entities else 0.5
-                for block in blocks:
+                # Question-entity matches sit above general block-entity
+                # matches; both stay below hop1's base score.
+                base = 1.0 if ent in question_entities else 0.7
+                for rank, block in enumerate(blocks):
                     if block.id not in seen_ids:
                         seen_ids.add(block.id)
+                        rr = 1.0 / (rank + 1.0)
                         strength = decay.calculate_strength(block)
-                        all_scored.append((block, strength + bonus))
+                        all_scored.append(
+                            (block, base + rr + strength * 0.05),
+                        )
 
         # Hop 3: graph walk from all retrieved blocks
         graph_candidates: dict[str, int] = {}

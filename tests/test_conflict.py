@@ -138,6 +138,84 @@ class TestConflictResolver:
         result = resolver.resolve("New", existing)
         assert len(result.actions) == 0  # Skipped invalid reference
 
+    def test_cross_type_update_dropped_when_new_block_type_set(self):
+        """v0.10.2 type-scoped guard: when the resolver picks a target
+        block of a *different* type than the new write, drop the
+        action. Prevents the FACT-content-overwrites-ENTITY bug."""
+        # The LLM is told to UPDATE blk_entity (type=ENTITY) with
+        # content from a new FACT write — should be dropped.
+        response = json.dumps([{
+            "action": "UPDATE",
+            "block_id": "blk_entity_xyz",
+            "new_content": "User likes that fund for tax-efficiency",
+            "reason": "Looks similar enough",
+        }])
+        resolver = ConflictResolver(provider=FakeLLMProvider(response))
+        # Existing block is an ENTITY (e.g., a fund anchor).
+        entity_block = Block(
+            id="blk_entity_xyz",
+            content="Parag Parikh Flexi Cap",
+            type=BlockType.ENTITY,
+            tags=[],
+            metadata=BlockMetadata(
+                confidence=1.0, source=SourceType.EXPLICIT,
+            ),
+        )
+        # We're storing a FACT — the resolver's UPDATE pointing at
+        # the ENTITY should be dropped.
+        result = resolver.resolve(
+            "User likes that fund for tax-efficiency",
+            [entity_block],
+            new_block_type=BlockType.FACT,
+        )
+        assert len(result.actions) == 0, (
+            f"cross-type UPDATE should be dropped; got {result.actions}"
+        )
+
+    def test_same_type_update_still_allowed_with_guard(self):
+        """The type-scoped guard must NOT drop legitimate same-type
+        UPDATE actions — that would break normal conflict resolution."""
+        response = json.dumps([{
+            "action": "UPDATE",
+            "block_id": "blk_fact_old",
+            "new_content": "User actually prefers active management",
+            "reason": "Supersedes prior fact",
+        }])
+        resolver = ConflictResolver(provider=FakeLLMProvider(response))
+        existing_fact = _make_block(
+            "User prefers passive index funds", "blk_fact_old",
+        )
+        result = resolver.resolve(
+            "User actually prefers active management",
+            [existing_fact],
+            new_block_type=BlockType.FACT,
+        )
+        assert len(result.actions) == 1
+        assert result.actions[0].action == ConflictActionType.UPDATE
+        assert result.actions[0].block_id == "blk_fact_old"
+
+    def test_no_type_arg_keeps_old_behavior(self):
+        """Backward-compat: when `new_block_type` isn't passed (legacy
+        callers), the type guard is off and all valid block_ids
+        pass through."""
+        response = json.dumps([{
+            "action": "UPDATE",
+            "block_id": "blk_entity_zzz",
+            "new_content": "Will be applied",
+            "reason": "Caller didn't opt into the type guard",
+        }])
+        resolver = ConflictResolver(provider=FakeLLMProvider(response))
+        entity_block = Block(
+            id="blk_entity_zzz", content="Some entity",
+            type=BlockType.ENTITY, tags=[],
+            metadata=BlockMetadata(
+                confidence=1.0, source=SourceType.EXPLICIT,
+            ),
+        )
+        # No new_block_type → guard is off → action survives.
+        result = resolver.resolve("New text", [entity_block])
+        assert len(result.actions) == 1
+
     def test_llm_failure_falls_back_to_add(self):
         resolver = ConflictResolver(provider=FailingProvider())
         existing = [_make_block("Info", "blk_1")]

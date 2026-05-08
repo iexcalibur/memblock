@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.10.2
+
+### Fixed
+- **Multi-hop relevance preservation**: `multi_hop_query()` was discarding the engine's relevance ranking. Hop-1 results were scored as `decay.calculate_strength(block) + 1.0` — a constant `+1.0` made all hop-1 candidates near-identical, and `decay.calculate_strength` (recency-biased) became the dominant tiebreaker. Result: multi-hop returned the most-recent blocks regardless of the query. Now uses **Reciprocal Rank weighting** (`1/(rank+1)`) so hop-1's relevance order is preserved through hop-2/hop-3 contributions. On the LoCoMo benchmark (199-question subset), recall jumped from **39.0% → 54.5%** (`+15.5pp`) with this fix alone. Sync `MultiHopRetriever` and async `AsyncMemBlock.multi_hop_query` both updated.
+
+- **Type-scoped conflict resolution**: The LLM-driven conflict resolver was operating on type-mixed candidates — a `FACT` write semantically similar to an existing `ENTITY` block could trigger an `UPDATE` action that overwrote the entity's content with the fact's text. `ConflictResolver.resolve()` and `AsyncConflictResolver.aresolve()` now accept an optional `new_block_type=` parameter; when supplied, `UPDATE`/`DELETE` actions targeting blocks of a *different* type are dropped and the new write falls through to a regular `ADD`. Both `MemBlock.store()` and `AsyncMemBlock.store()` pass the new block's type, so the guard is on by default for all SDK consumers. Same-type conflict resolution (FACT→FACT, PREFERENCE→PREFERENCE, etc.) is unchanged.
+
 ## v0.10.1
 
 ### Fixed
