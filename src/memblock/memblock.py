@@ -369,6 +369,25 @@ class MemBlock:
 
     def _auto_link_block(self, block: Block, tags: list[str] | None) -> None:
         """Create automatic graph edges for a newly stored block."""
+        # Retraction edges fire regardless of `_auto_link`. The
+        # conflict resolver explicitly opted in by marking
+        # `metadata._retracts: [block_ids]` on this block during
+        # store(); writing the CONTRADICTS edge is the materialisation
+        # of that intent. Skipping it because auto-link is off would
+        # silently break the retraction semantic.
+        retracts = (
+            getattr(block.metadata, "custom_metadata", None) or {}
+        ).get("_retracts") if hasattr(block, "metadata") else None
+        if retracts:
+            for retracted_id in retracts:
+                try:
+                    self._graph.link(
+                        block.id, retracted_id,
+                        relation=EdgeRelation.CONTRADICTS, weight=1.0,
+                    )
+                except Exception:
+                    pass
+
         if not self._auto_link:
             return
 
@@ -500,15 +519,45 @@ class MemBlock:
                             return self.get(action.block_id)  # type: ignore[return-value]
                         elif action.action == ConflictActionType.DELETE and action.block_id:
                             self.delete(action.block_id)
+                        elif action.action == ConflictActionType.RETRACT and action.block_id:
+                            # Retraction — soft-delete the prior block
+                            # AND record a CONTRADICTS edge from the
+                            # incoming retraction statement (which we
+                            # ADD below) back to the closed-out block.
+                            # We don't have the new block id yet (we're
+                            # about to ADD it), so we delete first and
+                            # link inside `_auto_link_block` via a
+                            # marker on the retraction's metadata.
+                            self.delete(action.block_id)
+                            # The auto-link layer reads this marker to
+                            # write the CONTRADICTS edge from the
+                            # newly-created retraction block to the
+                            # block we just closed. See `_auto_link_block`.
+                            if metadata is None:
+                                metadata = {}
+                            metadata = dict(metadata)
+                            metadata.setdefault("_retracts", []).append(action.block_id)
+                            # ADD falls through with metadata enriched
                         elif action.action == ConflictActionType.NONE:
                             return None  # type: ignore[return-value]
                         # ADD falls through to normal store flow
             except Exception:
                 pass  # conflict resolution failure falls through to normal store
 
-        # Check for duplicates before creating
+        # Check for duplicates before creating.
+        #
+        # Temporal-aware hashing for EVENT blocks: the same content
+        # at different `happened_at` timestamps must coexist (e.g.
+        # daily portfolio-value snapshots, XIRR/IIXR readings over
+        # time). For non-EVENT types we keep the content-only hash
+        # so re-stating the same fact still dedupes. See the
+        # docstring on `ContentHasher.hash_temporal` for the
+        # rationale on per-type dedup keys.
         if self._dedup is not None and self._on_duplicate is not None:
-            content_hash = ContentHasher.hash(content)
+            if type == BlockType.EVENT and happened_at is not None:
+                content_hash = ContentHasher.hash_temporal(content, happened_at)
+            else:
+                content_hash = ContentHasher.hash(content)
             existing = self._dedup.check(content, content_hash)
             if existing is not None:
                 if self._on_duplicate == DuplicatePolicy.ERROR:
@@ -687,6 +736,68 @@ class MemBlock:
                 "cascade": cascade,
             })
         return result
+
+    def hard_delete(self, block_id: str) -> bool:
+        """Permanently purge a block — see `AsyncMemBlock.hard_delete`
+        for the contract. Irreversible. Required for GDPR / India
+        DPDP "right to be forgotten" — soft-delete keeps the row
+        for audit; only hard-delete removes the data."""
+        block = self._storage.get_block(block_id)
+        if block is None:
+            return False
+        result = self._store.hard_delete(block_id)
+        if result:
+            try:
+                self._storage.delete_embedding(block_id)
+            except Exception:
+                pass
+            self._hooks.emit(EventType.ON_DELETE, {
+                "block_id": block_id,
+                "block": block,
+                "cascade": False,
+                "hard": True,
+            })
+        return result
+
+    def hard_delete_many(self, block_ids: list[str]) -> int:
+        """Batch hard-delete. Returns the count actually purged."""
+        count = 0
+        for bid in block_ids:
+            try:
+                if self.hard_delete(bid):
+                    count += 1
+            except Exception:
+                continue
+        return count
+
+    def introspect_user(
+        self,
+        *,
+        include_deleted: bool = False,
+        limit: int | None = None,
+    ) -> list["Block"]:
+        """Return every block this instance holds for its bound user.
+        Powers the "what do you remember about me?" surface — see the
+        AsyncMemBlock variant for the full contract / use cases.
+
+        Goes directly to the storage layer (not through `query()`)
+        because `query()` applies decay + relevance ranking + always
+        excludes soft-deleted blocks. Introspection needs the raw
+        set, optionally including soft-deleted rows for audit /
+        disclosure flows.
+        """
+        blocks = self._storage.get_all_blocks(include_deleted=include_deleted)
+        # Sort newest-first for the disclosure UI.
+        try:
+            blocks.sort(
+                key=lambda b: getattr(b.metadata, "created_at", None) or "",
+                reverse=True,
+            )
+        except Exception:
+            pass
+        if limit is not None:
+            blocks = blocks[:limit]
+        return blocks
 
     # ─── Graph Operations ─────────────────────────────────────────────────
 

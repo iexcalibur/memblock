@@ -28,11 +28,35 @@ from memblock.block import Block
 
 
 class ConflictActionType(str, Enum):
-    """Possible conflict resolution actions."""
+    """Possible conflict resolution actions.
+
+    `RETRACT` (added 0.12.0) is the user-initiated retraction of a
+    prior fact — "I sold my Vanguard position", "Actually we moved
+    out of Berlin", etc. Distinct from `DELETE` in three ways:
+      1. Semantic intent — the prior memory WAS true at write time
+         and is being closed out, not corrected. Useful when the
+         downstream consumer wants to display "you closed this
+         position" vs "you never said this".
+      2. Audit footprint — RETRACT keeps the original block via
+         soft-delete; DELETE is the same. Both leave the op-log
+         entry intact. (For irreversible removal use
+         `MemBlock.hard_delete()` directly, not via conflict
+         resolution.)
+      3. Edge handling — the resolver SHOULD link the retraction to
+         the original block via a CONTRADICTS edge so the graph
+         retains the "X was true until Y" relationship.
+
+    LLM resolvers should prefer RETRACT over DELETE for natural-
+    language closure statements ("sold", "moved", "no longer",
+    "we got rid of", "cancelled"). DELETE is reserved for factual
+    corrections of memories that were never true ("actually no, I
+    never lived in Berlin").
+    """
 
     ADD = "ADD"
     UPDATE = "UPDATE"
     DELETE = "DELETE"
+    RETRACT = "RETRACT"
     NONE = "NONE"
 
 
@@ -58,19 +82,21 @@ class ConflictResult:
 CONFLICT_SYSTEM_PROMPT = """You are a memory conflict resolver. Given NEW information and EXISTING memories, decide what to do.
 
 For each piece of new information, output a JSON array of actions:
-- "action": "ADD" | "UPDATE" | "DELETE" | "NONE"
-- "block_id": ID of the existing block to update/delete (null for ADD/NONE)
-- "new_content": The content to store (for ADD) or the updated text (for UPDATE). Null for DELETE/NONE.
+- "action": "ADD" | "UPDATE" | "DELETE" | "RETRACT" | "NONE"
+- "block_id": ID of the existing block to update/delete/retract (null for ADD/NONE)
+- "new_content": The content to store (for ADD) or the updated text (for UPDATE). Null for DELETE/RETRACT/NONE.
 - "reason": Brief explanation of why this action was chosen
 
 Rules:
 1. ADD: New info that doesn't conflict with or duplicate anything existing
 2. UPDATE: New info that supersedes or refines an existing memory — provide the UPDATED content
-3. DELETE: An existing memory that is now incorrect or contradicted by the new info
-4. NONE: The new info is already captured or too trivial to store
-5. Be conservative — prefer NONE over ADD if the info is already known
-6. When updating, merge the old and new info into a single coherent statement
-7. Only DELETE when the new info clearly contradicts an existing memory
+3. DELETE: An existing memory that was factually WRONG and should be erased ("actually I never lived in Berlin", "no, that's not my fund")
+4. RETRACT: An existing memory that WAS true at the time but is now closed out — sold positions, ended subscriptions, moved away, broke up, no-longer-applies statements. Triggered by phrases like "I sold", "we moved out of", "I cancelled", "I no longer", "we ended", "I got rid of", "that's behind us now". Prefer RETRACT over DELETE for any natural-language closure.
+5. NONE: The new info is already captured or too trivial to store
+6. Be conservative — prefer NONE over ADD if the info is already known
+7. When updating, merge the old and new info into a single coherent statement
+
+The RETRACT vs DELETE distinction matters: RETRACT preserves the "X was true until Y" history for downstream consumers (audit, regulatory disclosure, portfolio replay); DELETE erases it as if never said.
 
 Respond with ONLY the JSON array, no other text."""
 

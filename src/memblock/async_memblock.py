@@ -465,6 +465,20 @@ class AsyncMemBlock:
                         if (action.action == ConflictActionType.DELETE
                                 and action.block_id):
                             await self.delete(action.block_id)
+                        elif (action.action == ConflictActionType.RETRACT
+                                and action.block_id):
+                            # See sync MemBlock.store for the rationale.
+                            # Soft-delete the retracted block + mark
+                            # the about-to-be-stored block with
+                            # `_retracts: [...]` so the auto-link layer
+                            # can write a CONTRADICTS edge from the
+                            # retraction to the closed-out block.
+                            await self.delete(action.block_id)
+                            if metadata is None:
+                                metadata = {}
+                            metadata = dict(metadata)
+                            metadata.setdefault("_retracts", []).append(action.block_id)
+                            # ADD falls through with metadata enriched
                         elif action.action == ConflictActionType.NONE:
                             return None
                         # ADD falls through to normal store
@@ -472,8 +486,18 @@ class AsyncMemBlock:
                 pass  # CR failure → normal store path
 
         # ── Dedup check
+        #
+        # Temporal-aware hash for EVENT writes — see the docstring on
+        # `ContentHasher.hash_temporal`. Lets identical content at
+        # different `happened_at` timestamps coexist (e.g. daily
+        # IIXR/XIRR snapshots, portfolio-value over time). Non-EVENT
+        # writes keep the content-only hash so re-stating the same
+        # fact still dedupes.
         if self._on_duplicate is not None:
-            content_hash = ContentHasher.hash(content)
+            if type == BlockType.EVENT and happened_at is not None:
+                content_hash = ContentHasher.hash_temporal(content, happened_at)
+            else:
+                content_hash = ContentHasher.hash(content)
             existing = await self._async_storage.get_block_by_content_hash(
                 content_hash,
             )
@@ -541,7 +565,15 @@ class AsyncMemBlock:
             encrypted=encrypted_flag,
             parent_id=parent_id,
             tags=tags or [],
-            content_hash=ContentHasher.hash(content),
+            # Persisted hash MUST match the dedup-check hash above so
+            # the next write at the same (content, happened_at) finds
+            # this block via fast-path lookup. Per-type policy: EVENT
+            # uses temporal hash, others content-only.
+            content_hash=(
+                ContentHasher.hash_temporal(content, happened_at)
+                if type == BlockType.EVENT and happened_at is not None
+                else ContentHasher.hash(content)
+            ),
         )
 
         # ── Parent-child wiring
@@ -697,6 +729,140 @@ class AsyncMemBlock:
             "cascade": cascade,
         })
         return True
+
+    async def hard_delete(self, block_id: str) -> bool:
+        """Permanently purge a block from storage.
+
+        Unlike `delete()` (soft-delete: sets `deleted=True` and keeps
+        the row for audit / restore), `hard_delete()` removes the
+        block row + its edges + its embedding from the underlying
+        storage. **Irreversible.**
+
+        Required for "forget me" / GDPR / DPDP "right to be
+        forgotten" compliance — soft-deleted blocks remain
+        queryable (e.g. with `include_deleted=True`) and discoverable
+        in op-log replay; only hard-delete removes the data entirely.
+
+        Returns `True` if the block was found and purged, `False` if
+        the id didn't exist. Edges and embeddings are removed in the
+        same call; the op-log entry is appended BEFORE the purge so
+        the audit trail records the action even though the block
+        itself is gone.
+        """
+        if not self._native_async:
+            return await asyncio.to_thread(self._mem.hard_delete, block_id)
+        await self._ensure_initialized()
+        block = await self._async_storage.get_block(block_id)
+        if block is None:
+            return False
+        # Audit BEFORE purge — once the row is gone the op-log entry
+        # is the only record this block ever existed.
+        await self._append_operation(
+            action=OpAction.DELETE,
+            block_id=block_id,
+            data={"hard": True},
+        )
+        try:
+            await self._async_storage.delete_edges_for_block(block_id)
+            await self._async_storage.delete_embedding(block_id)
+        except Exception:
+            # Best-effort cleanup; the block row removal below is the
+            # primary action and should succeed regardless of edge /
+            # embedding state.
+            pass
+        await self._async_storage.delete_block(block_id)
+        self._hooks.emit(EventType.ON_DELETE, {
+            "block_id": block_id,
+            "block": block,
+            "cascade": False,
+            "hard": True,
+        })
+        return True
+
+    async def hard_delete_many(self, block_ids: list[str]) -> int:
+        """Batch hard-delete. Returns the count of blocks actually
+        purged (silently skips ids that didn't exist). Useful for
+        the GDPR "delete all my data" path — caller passes the full
+        list from `introspect_user()`."""
+        count = 0
+        for bid in block_ids:
+            try:
+                if await self.hard_delete(bid):
+                    count += 1
+            except Exception:
+                continue
+        return count
+
+    async def introspect_user(
+        self,
+        *,
+        user_id: str | None = None,
+        include_deleted: bool = False,
+        limit: int | None = None,
+    ) -> list["Block"]:
+        """Return every block stored for this user — the canonical
+        "what do you remember about me?" surface.
+
+        Powers two distinct use cases:
+          1. Privacy disclosure ("right to access" under GDPR /
+             India DPDP) — show the user everything held about them
+             so they can verify / request deletion.
+          2. Agent introspection — let an assistant honestly answer
+             "what do you still remember about me?" rather than
+             fabricating coverage. Pairs with `hard_delete_many`
+             when the user asks to forget specific items.
+
+        `user_id` defaults to the instance's bound user (set at
+        construction); pass an explicit value only in admin tooling
+        that switches scope per call.
+
+        `include_deleted` defaults to False — soft-deleted blocks
+        are excluded so the user-facing "what we remember" surface
+        matches what's actually used in advice. Set True for audit
+        flows that need the full history.
+
+        `limit` defaults to None (return everything). Set when paging
+        a large user's blocks to a UI.
+
+        Returns blocks in `created_at DESC` order (newest first) —
+        most useful for the privacy-disclosure UI which typically
+        shows recent activity at the top.
+        """
+        if not self._native_async:
+            # Sync path: there's no `introspect` on the underlying
+            # store, so we query with a very high limit and filter
+            # by deleted flag in code. Acceptable for the small-N
+            # users typical of personal-AI deployments.
+            blocks = await asyncio.to_thread(
+                self._mem.query,
+                type=None,
+                limit=limit or 10_000,
+                include_decayed=True,
+                min_strength=0.0,
+            )
+            if not include_deleted:
+                blocks = [b for b in blocks if not getattr(b, "deleted", False)]
+            return blocks
+        await self._ensure_initialized()
+        # Storage layer query — no semantic re-rank, no decay scoring;
+        # raw retrieval for the disclosure surface.
+        filters: dict[str, Any] = {}
+        if not include_deleted:
+            filters["include_deleted"] = False
+        blocks = await self._async_storage.query_blocks(filters)
+        # Sort newest-first so the disclosure UI shows recent activity
+        # at the top. `created_at` may be naive datetime; cast to str
+        # as a safe ordering key when comparison fails.
+        try:
+            blocks.sort(
+                key=lambda b: getattr(b.metadata, "created_at", None) or "",
+                reverse=True,
+            )
+        except Exception:
+            pass
+        if limit is not None:
+            blocks = blocks[:limit]
+        return blocks
 
     # ─── Graph Operations ─────────────────────────────────────────────
 
@@ -1625,7 +1791,28 @@ class AsyncMemBlock:
         multi-hop walks miss semantically-related but tag-disjoint
         blocks (e.g., two blocks about "tax" written before a `tax`
         tag was introduced).
+
+        v0.12.0 added retraction edges: when the conflict resolver
+        marks the incoming block as a retraction of one or more
+        prior blocks (via `metadata._retracts`), a CONTRADICTS edge
+        is written from the retraction to each retracted block.
+        Fires regardless of `_auto_link_enabled` because the link
+        is the *semantic* of the retraction, not auto-linking.
         """
+        # Retraction edges — see sync `_auto_link_block` for rationale.
+        retracts = (
+            getattr(block.metadata, "custom_metadata", None) or {}
+        ).get("_retracts") if hasattr(block, "metadata") else None
+        if retracts:
+            for retracted_id in retracts:
+                try:
+                    await self.link(
+                        block.id, retracted_id,
+                        relation=EdgeRelation.CONTRADICTS, weight=1.0,
+                    )
+                except Exception:
+                    pass
+
         if not self._auto_link_enabled:
             return
 

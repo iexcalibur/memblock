@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.12.0
+
+### Added — three gaps closed (G1, G2, G3) so MemBlock can power "AI remembers everything" use cases
+
+- **Temporal-aware deduplication for EVENT blocks (G1).** Storing the same content at different `happened_at` timestamps now produces distinct blocks instead of colliding on the content-only hash. The right primitive for time-series state — daily XIRR/IIXR readings, portfolio-value snapshots, fund NAV history, anything where "same value at different times" is fundamentally two pieces of information. Per-type policy: only EVENT writes with an explicit `happened_at` use the temporal-aware hash; FACT / PREFERENCE / ENTITY / RELATION keep the existing content-only hash so re-stating the same fact still dedupes. New helper: `ContentHasher.hash_temporal(content, happened_at)`. Wired automatically inside `MemBlock.store()` and `AsyncMemBlock.store()` — callers don't change.
+
+- **Hard delete (G2a).** `MemBlock.hard_delete(block_id)` and `AsyncMemBlock.hard_delete(block_id)` permanently purge a block + its edges + its embedding from storage. Distinct from the existing `delete()` (soft-delete: sets `deleted=True` and keeps the row for audit). Required for "right to be forgotten" under GDPR / India DPDP — soft-deleted blocks remain queryable with `include_deleted=True` and discoverable via op-log replay. Op-log entry is appended BEFORE the purge so the audit trail records the deletion even after the block row is gone. Batch variant: `hard_delete_many(block_ids)` returns the count actually purged (silently skips ids that didn't exist).
+
+- **Introspection API (G2b).** `MemBlock.introspect_user()` and `AsyncMemBlock.introspect_user(*, user_id=None, include_deleted=False, limit=None)` return every block the SDK holds for the bound user — the canonical surface behind "what do you remember about me?" agent introspection AND privacy "right to access" disclosures. Excludes soft-deleted blocks by default so the disclosure matches what's actually used in advice. Sorted `created_at DESC` (newest first) for natural disclosure-UI layout. Pairs with `hard_delete_many()` for the full "show me everything → forget all of it" round trip.
+
+- **RETRACT conflict action (G3).** New `ConflictActionType.RETRACT` value distinguishes user-initiated closures ("I sold my Vanguard position", "we cancelled the SIP", "moved out of Berlin") from factual corrections (DELETE — "actually I never lived in Berlin"). RETRACT soft-deletes the prior block AND writes a `CONTRADICTS` edge from the new retraction block to the closed-out block, preserving the "X was true until Y" history. The LLM conflict-resolver prompt was updated to teach the model when to emit RETRACT vs DELETE (closure verbs → RETRACT; "actually never" → DELETE). Wired into both sync and async `store()` paths under the existing `conflict_resolution=True` flag — no new opt-in needed.
+
+### Changed
+- `CONFLICT_SYSTEM_PROMPT` now documents the RETRACT action and the RETRACT-vs-DELETE distinction. Existing ADD / UPDATE / DELETE / NONE behavior unchanged.
+
+### Tests
+- New: `test_temporal_dedup.py` (pure-hash + storage-level tests covering same-content-different-time, same-content-same-time, FACT-still-dedupes, EVENT-without-happened_at-falls-back).
+- New: `test_hard_delete_and_introspect.py` (hard_delete round-trip, soft-vs-hard distinction, hard_delete_many, introspect with/without include_deleted, introspect→forget round trip).
+- New: `test_retract.py` (enum membership, prompt documents RETRACT, CONTRADICTS edge is written when `metadata._retracts` marker is set).
+
+### Migration notes
+- **Backward compatible.** No schema changes; the temporal hash is opt-in by block type and only fires when `happened_at` is provided. Existing FACT / PREFERENCE / ENTITY / RELATION writes behave identically.
+- Existing soft-delete (`delete()`) is unchanged. `hard_delete()` is purely additive.
+- Existing ConflictAction handlers can ignore the new `RETRACT` enum value — the SDK handles it transparently when conflict resolution is enabled. Custom handlers wishing to surface retracted state in the UI should look for `EdgeRelation.CONTRADICTS` edges out of newly-stored blocks.
+
 ## v0.11.0
 
 ### Added

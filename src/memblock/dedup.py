@@ -24,7 +24,24 @@ class DuplicatePolicy(str, Enum):
 
 
 class ContentHasher:
-    """Computes normalized content hashes for deduplication."""
+    """Computes normalized content hashes for deduplication.
+
+    Two hash variants:
+      - `hash(content)` — pure content hash. The legacy default used
+        for FACT / PREFERENCE / ENTITY / RELATION blocks where the
+        same statement at different times is genuinely a duplicate.
+      - `hash_temporal(content, happened_at)` — content + ISO-8601
+        timestamp folded into the hash. The right key for EVENT
+        blocks and any other time-series data where storing the
+        same value at different timestamps must coexist (portfolio
+        balance over time, XIRR snapshots, daily fund NAVs, etc.).
+
+    Why two variants instead of one: a single time-aware hash would
+    duplicate FACT blocks every microsecond a user re-states the
+    same fact (their risk profile, their name, …) — defeating the
+    whole point of deduplication. The choice is type-driven: EVENT
+    is time-series by definition, the rest is statement-of-fact.
+    """
 
     @staticmethod
     def hash(content: str) -> str:
@@ -37,6 +54,42 @@ class ContentHasher:
         normalized = normalized.strip().lower()
         normalized = re.sub(r"\s+", " ", normalized)
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def hash_temporal(content: str, happened_at: Any) -> str:
+        """
+        Time-aware variant: hash includes a normalized timestamp so
+        the SAME content at DIFFERENT times produces DIFFERENT hashes
+        (two distinct blocks instead of a dedup collision).
+
+        `happened_at` may be:
+          - a `datetime` (naive or tz-aware) — serialized via isoformat()
+          - an ISO-8601 string — used verbatim after lowercasing
+          - `None` — falls back to non-temporal `hash()` so existing
+            callers that omit happened_at keep their current
+            dedup semantics
+
+        Use for EVENT-typed writes; pair `dedup_temporal=True` on
+        the AsyncMemBlock/MemBlock constructor (or per-store call)
+        to opt in. Default behaviour for non-EVENT writes is
+        unchanged.
+        """
+        if happened_at is None:
+            return ContentHasher.hash(content)
+        try:
+            ts = (
+                happened_at.isoformat()
+                if hasattr(happened_at, "isoformat")
+                else str(happened_at)
+            )
+        except Exception:
+            ts = str(happened_at)
+        ts_norm = ts.strip().lower()
+        normalized = unicodedata.normalize("NFC", content)
+        normalized = normalized.strip().lower()
+        normalized = re.sub(r"\s+", " ", normalized)
+        composite = f"{normalized}\x1f{ts_norm}"  # ASCII Unit Separator
+        return hashlib.sha256(composite.encode("utf-8")).hexdigest()
 
 
 class DuplicateChecker:

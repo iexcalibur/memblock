@@ -85,7 +85,17 @@ class BlockStore:
             encryption_level=encryption_level,
             parent_id=parent_id,
             tags=tags or [],
-            content_hash=ContentHasher.hash(content),
+            # Temporal-aware hash for EVENT blocks (per-type dedup
+            # policy — see `ContentHasher.hash_temporal` docstring).
+            # The hash stored here MUST match the hash the dedup
+            # checker computed in MemBlock.store() / AsyncMemBlock.store(),
+            # otherwise the next write at the same (content, ts) won't
+            # collide via fast-path lookup.
+            content_hash=(
+                ContentHasher.hash_temporal(content, happened_at)
+                if type == BlockType.EVENT and happened_at is not None
+                else ContentHasher.hash(content)
+            ),
         )
 
         # Validate
