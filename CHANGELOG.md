@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.12.1
+
+### Fixed
+
+- **`AsyncMemBlock.introspect_user(include_deleted=True)` now actually surfaces soft-deleted blocks** (previously silently dropped them, regardless of the flag). Two bugs were present:
+  1. The sync-fallback path went through `self._mem.query(...)`, which calls `query_blocks` and always strips `deleted=TRUE` rows. The `include_deleted` flag never reached the storage filter.
+  2. The native-async path passed `{"include_deleted": False}` to `query_blocks`, but the storage filter key is `"deleted"` — the key mismatch meant the `deleted=FALSE` WHERE-clause was appended unconditionally, same silent-strip outcome.
+  Both paths now route through `storage.get_all_blocks(include_deleted=...)`, the same primitive `MemBlock.introspect_user` (sync) already used correctly. Regression test added at `tests/test_hard_delete_and_introspect.py::TestAsyncIntrospectUser::test_async_introspect_include_deleted_returns_soft_deleted` — would have caught both bugs.
+
+  Impact: "right to access" disclosure surfaces and any history-recovery flow (e.g. "show every prior value of this profile field") were silently empty in the async path. The sync path was correct throughout.
+
 ## v0.12.0
 
 ### Added — three gaps closed (G1, G2, G3) so MemBlock can power "AI remembers everything" use cases

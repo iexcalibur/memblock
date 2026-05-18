@@ -13,7 +13,7 @@ Usage:
     mem.verify()  # check tamper detection
 """
 
-__version__ = "0.12.0"
+__version__ = "0.12.1"
 
 from memblock.block import Block
 from memblock.context import ContextBuilder

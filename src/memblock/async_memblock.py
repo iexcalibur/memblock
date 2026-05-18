@@ -828,28 +828,34 @@ class AsyncMemBlock:
         most useful for the privacy-disclosure UI which typically
         shows recent activity at the top.
         """
+        # Both paths now route through `storage.get_all_blocks(
+        # include_deleted=...)` — the canonical primitive for the
+        # disclosure surface. The sync `MemBlock.introspect_user`
+        # already does this correctly, so the sync-fallback can
+        # just delegate.
+        #
+        # Bug fix history (v0.12.1):
+        #   - Old sync path went through `_mem.query(...)` which
+        #     internally calls `query_blocks` and ALWAYS strips
+        #     `deleted=True` rows. Result: `include_deleted=True`
+        #     silently returned only non-deleted blocks.
+        #   - Old native path called `query_blocks({"include_deleted":
+        #     False})` — but the storage filter key is `"deleted"`,
+        #     not `"include_deleted"`. The key mismatch meant the
+        #     deleted=FALSE clause was appended unconditionally,
+        #     same silent-strip bug.
+        # Both fixed by routing through `get_all_blocks(include_deleted=)`
+        # which the storage adapters honor correctly.
         if not self._native_async:
-            # Sync path: there's no `introspect` on the underlying
-            # store, so we query with a very high limit and filter
-            # by deleted flag in code. Acceptable for the small-N
-            # users typical of personal-AI deployments.
-            blocks = await asyncio.to_thread(
-                self._mem.query,
-                type=None,
-                limit=limit or 10_000,
-                include_decayed=True,
-                min_strength=0.0,
+            return await asyncio.to_thread(
+                self._mem.introspect_user,
+                include_deleted=include_deleted,
+                limit=limit,
             )
-            if not include_deleted:
-                blocks = [b for b in blocks if not getattr(b, "deleted", False)]
-            return blocks
         await self._ensure_initialized()
-        # Storage layer query — no semantic re-rank, no decay scoring;
-        # raw retrieval for the disclosure surface.
-        filters: dict[str, Any] = {}
-        if not include_deleted:
-            filters["include_deleted"] = False
-        blocks = await self._async_storage.query_blocks(filters)
+        blocks = await self._async_storage.get_all_blocks(
+            include_deleted=include_deleted,
+        )
         # Sort newest-first so the disclosure UI shows recent activity
         # at the top. `created_at` may be naive datetime; cast to str
         # as a safe ordering key when comparison fails.
