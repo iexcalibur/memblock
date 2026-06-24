@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.13.0
+
+### Added — externally-managed schema (run under a DML-only database role)
+
+- **`manage_schema` flag on `MemBlock` and `AsyncMemBlock` (default `True`).** When `False`, the PostgreSQL adapters emit **zero DDL** — no `CREATE TABLE/INDEX/FUNCTION/TRIGGER`, no `ALTER`, no `CREATE SCHEMA`, and no migration runner. The memblock schema is expected to be provisioned out of band (see the new `sql/` directory), so the package can run under a least-privilege, DML-only database role. This satisfies security reviews that forbid an application dependency from holding DDL rights on the database. Threaded through to `PostgreSQLAdapter` / `AsyncPostgreSQLAdapter` via `manage_schema=`.
+
+- **Every DDL surface is silenced, not just `initialize()`.** `manage_schema=False` also short-circuits the lazy pgvector index creation in `_ensure_pgvector_index()` (a runtime DDL path that otherwise fires on the first embedding write). Server-side pgvector search still works under the restricted role — `initialize()` runs only a **read-only** capability check (`SELECT … FROM pg_extension`) to detect the extension, never DDL. This is required because `initialize()` runs `CREATE OR REPLACE FUNCTION` unconditionally, which needs table ownership a DML-only role lacks; the flag is the supported way to avoid that call.
+
+- **Standalone schema SQL (`sql/`).** `sql/01_memblock_schema.sql` is the full current-state schema (all migrations v2–v7 folded inline, `schema_version` seeded to 7), `sql/02_memblock_grants.sql` is a least-privilege DML-only `GRANT` set, and `sql/README.md` documents the DDL-vs-DML split, the deploy steps, and the runtime DDL surfaces to pre-provision. A DBA / migration tool (Flyway / Liquibase / Alembic) reviews and applies these instead of the package.
+
+### Tests
+- New: `test_manage_schema.py` — flag plumbing through both clients and adapters; the no-DDL invariant on `initialize()` and `_ensure_pgvector_index()` for both sync and async (spy connections, no DB required); a contrast test proving `manage_schema=True` still provisions; and a gated live-DB integration test proving a `manage_schema=False` client does full CRUD against a pre-provisioned schema while adding zero schema objects.
+
+### Migration notes
+- **Backward compatible.** `manage_schema` defaults to `True`, so existing deployments auto-provision exactly as before. The locked-down mode is strictly opt-in. PostgreSQL only; ignored for SQLite (a local file you own).
+
 ## v0.12.1
 
 ### Fixed

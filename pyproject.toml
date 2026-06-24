@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memblock"
-version = "0.12.1"
+version = "0.13.0"
 description = "Typed block tree + knowledge graph memory SDK for AI agents"
 readme = "README.md"
 license = {text = "Proprietary"}

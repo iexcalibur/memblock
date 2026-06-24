@@ -20,3 +20,10 @@ htmlcov/
 *.swo
 memblock-website/
 .claude/
+
+# Credentials — never commit (PyPI tokens, env secrets)
+.pypirc
+.env
+.env.*
+*.pem
+*.token
