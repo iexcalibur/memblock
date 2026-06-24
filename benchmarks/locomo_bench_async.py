@@ -36,7 +36,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from memblock import AsyncMemBlock, BlockType, SourceType
-from memblock.rerankers import HeuristicReranker
+from memblock.rerankers import (
+    BM25Reranker, HeuristicReranker,
+)
 
 
 CATEGORIES = {
@@ -165,6 +167,17 @@ async def drop_schema(dsn: str, schema: str) -> None:
 # ─── Benchmark runner ────────────────────────────────────────────────
 
 
+def _make_reranker(name: str):
+    """Pick a reranker by lowercase name. None for no reranker."""
+    if not name or name == "none":
+        return None
+    if name == "heuristic":
+        return HeuristicReranker()
+    if name == "bm25":
+        return BM25Reranker()
+    raise ValueError(f"unknown reranker: {name!r}")
+
+
 async def run_benchmark(
     *,
     data_file: str,
@@ -172,6 +185,7 @@ async def run_benchmark(
     embeddings: str | bool,
     top_k: int = 10,
     mode: str = "basic",
+    reranker_name: str = "heuristic",
     limit: int = 0,
     out_file: str | None = None,
 ):
@@ -215,7 +229,7 @@ async def run_benchmark(
         )
 
         try:
-            reranker = HeuristicReranker() if mode == "hybrid" else None
+            reranker = _make_reranker(reranker_name) if mode == "hybrid" else None
             mem = AsyncMemBlock(
                 storage=dsn,
                 embeddings=embeddings,
@@ -304,6 +318,11 @@ def main():
     )
     p.add_argument("--top-k", type=int, default=10)
     p.add_argument("--mode", default="hybrid", choices=["basic", "hybrid", "multihop"])
+    p.add_argument(
+        "--reranker", default="heuristic",
+        choices=["none", "heuristic", "bm25"],
+        help="Reranker (only used when mode=hybrid)",
+    )
     p.add_argument("--limit", type=int, default=0, help="N conversations (0 = all)")
     p.add_argument(
         "--out",
@@ -327,6 +346,7 @@ def main():
         embeddings=embeddings,
         top_k=args.top_k,
         mode=args.mode,
+        reranker_name=args.reranker,
         limit=args.limit,
         out_file=args.out,
     ))

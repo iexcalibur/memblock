@@ -97,6 +97,7 @@ class MemBlock:
         enable_analytics: bool = False,
         analytics_noise_words: set[str] | None = None,
         pool: Any = None,
+        manage_schema: bool = True,
     ) -> None:
         """
         Initialize MemBlock.
@@ -162,6 +163,15 @@ class MemBlock:
                 pooling. When provided, the adapter obtains connections from the
                 pool instead of creating its own. Ignored for SQLite storage.
                 Install with: pip install memblock[pool]
+            manage_schema: When True (default), the adapter provisions its own
+                schema — CREATE TABLE/INDEX/FUNCTION/TRIGGER and migrations run
+                on init. When False, the adapter performs NO DDL and assumes the
+                memblock schema was provisioned out of band (see sql/ in the
+                repo). Use False to run under a least-privilege, DML-only
+                database role so an external package never issues DDL against
+                your database. PostgreSQL only; ignored for SQLite (a local file
+                you own). When False, server-side pgvector search still works —
+                the adapter only runs a read-only capability check, not DDL.
         """
         # ── License validation (disabled — re-enable for paid tier) ──
         # secret = get_secret()
@@ -191,7 +201,9 @@ class MemBlock:
 
         # Parse storage URI
         self._pool = pool
-        self._storage = self._create_storage(storage, user_id, pool=pool)
+        self._storage = self._create_storage(
+            storage, user_id, pool=pool, manage_schema=manage_schema
+        )
         self._storage.initialize()
 
         # Initialize embedding provider (optional)
@@ -256,7 +268,12 @@ class MemBlock:
         self._analytics = None  # Lazy-initialized
 
     @staticmethod
-    def _create_storage(uri: str, user_id: str = "default", pool: Any = None) -> StorageAdapter:
+    def _create_storage(
+        uri: str,
+        user_id: str = "default",
+        pool: Any = None,
+        manage_schema: bool = True,
+    ) -> StorageAdapter:
         """Create a storage adapter from a URI string."""
         if uri.startswith("postgresql://") or uri.startswith("postgres://"):
             try:
@@ -266,7 +283,9 @@ class MemBlock:
                     "PostgreSQL adapter requires psycopg. "
                     "Install with: pip install memblock[postgres]"
                 )
-            return PostgreSQLAdapter(dsn=uri, user_id=user_id, pool=pool)
+            return PostgreSQLAdapter(
+                dsn=uri, user_id=user_id, pool=pool, manage_schema=manage_schema
+            )
         elif uri.startswith("sqlite:///"):
             db_path = uri[len("sqlite:///"):]
             return SQLiteAdapter(db_path)

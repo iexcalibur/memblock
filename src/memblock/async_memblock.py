@@ -255,6 +255,7 @@ class AsyncMemBlock:
             pool=kwargs.get("pool"),
             pool_min_size=kwargs.get("pool_min_size", 2),
             pool_max_size=kwargs.get("pool_max_size", 20),
+            manage_schema=kwargs.get("manage_schema", True),
         )
 
         # ── Embedding provider (sync; HTTP-bound — wrapped via to_thread)

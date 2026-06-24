@@ -69,6 +69,7 @@ class PostgreSQLAdapter(StorageAdapter):
         user_id: str = "default",
         schema: str = "public",
         pool: Any = None,
+        manage_schema: bool = True,
     ) -> None:
         if not HAS_PSYCOPG:
             raise ImportError(
@@ -84,6 +85,9 @@ class PostgreSQLAdapter(StorageAdapter):
         self._conn: psycopg.Connection | None = None
         self._has_pgvector: bool = False
         self._embedding_dims: int | None = None
+        # When False, emit NO DDL — the schema is provisioned out of band and
+        # this adapter runs under a DML-only role. See MemBlock(manage_schema=).
+        self._manage_schema: bool = manage_schema
 
     @property
     def adapter_type(self) -> str:
@@ -103,7 +107,29 @@ class PostgreSQLAdapter(StorageAdapter):
         return self._conn
 
     def initialize(self) -> None:
-        """Create all MemBlock tables if they don't exist."""
+        """Create all MemBlock tables if they don't exist.
+
+        When ``manage_schema=False`` this emits NO DDL: the schema is assumed
+        to be provisioned out of band (see sql/). Only a read-only pgvector
+        capability check runs, so server-side vector search keeps working under
+        a least-privilege, DML-only database role.
+        """
+        if not self._manage_schema:
+            # Externally-managed schema: zero DDL. Detect pgvector via a
+            # read-only catalog query and register its codec so vector search
+            # still works; CREATE EXTENSION / CREATE TABLE / migrations are the
+            # provisioning role's responsibility, not this app role's.
+            if HAS_PGVECTOR:
+                with self.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM pg_extension WHERE extname = 'vector'"
+                    )
+                    if cur.fetchone():
+                        self._has_pgvector = True
+                        register_vector(self.conn)
+                self.conn.commit()
+            return
+
         with self.conn.cursor() as cur:
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.schema}.memblock_blocks (
@@ -714,6 +740,12 @@ class PostgreSQLAdapter(StorageAdapter):
         if self._embedding_dims is not None:
             return
         self._embedding_dims = dims
+
+        if not self._manage_schema:
+            # Externally-managed schema: the vector index is provisioned out of
+            # band. Never emit CREATE INDEX. (Caching dims above prevents this
+            # from re-checking on every embedding write.)
+            return
 
         index_type = "hnsw" if dims <= self._HNSW_MAX_DIMS else "ivfflat"
         index_name = f"idx_mb_embeddings_vec_{index_type}"

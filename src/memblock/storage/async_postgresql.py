@@ -97,6 +97,7 @@ class AsyncPostgreSQLAdapter(AsyncStorageAdapter):
         pool: Any = None,
         pool_min_size: int = 2,
         pool_max_size: int = 20,
+        manage_schema: bool = True,
     ) -> None:
         if not HAS_ASYNCPG:
             raise ImportError(
@@ -114,6 +115,9 @@ class AsyncPostgreSQLAdapter(AsyncStorageAdapter):
         self._has_pgvector: bool = False
         self._embedding_dims: int | None = None
         self._initialized = False
+        # When False, emit NO DDL — the schema is provisioned out of band and
+        # this adapter runs under a DML-only role. See AsyncMemBlock(manage_schema=).
+        self._manage_schema: bool = manage_schema
 
     @property
     def adapter_type(self) -> str:
@@ -150,11 +154,30 @@ class AsyncPostgreSQLAdapter(AsyncStorageAdapter):
     async def initialize(self) -> None:
         """Create all memblock_* tables, indexes, FTS triggers, and
         the pgvector embeddings table when the extension is present.
-        Idempotent — `CREATE TABLE IF NOT EXISTS` throughout."""
+        Idempotent — `CREATE TABLE IF NOT EXISTS` throughout.
+
+        When ``manage_schema=False`` this emits NO DDL: the schema is assumed
+        to be provisioned out of band (see sql/). Only a read-only pgvector
+        capability check runs, so server-side vector search keeps working under
+        a least-privilege, DML-only database role."""
         if self._initialized:
             return
 
         pool = await self._ensure_pool()
+
+        if not self._manage_schema:
+            # Externally-managed schema: zero DDL. Only flip the pgvector
+            # capability flag via a read-only catalog query — the per-connection
+            # vector codec is already registered in `_init_connection`.
+            if HAS_PGVECTOR:
+                async with pool.acquire() as conn:
+                    present = await conn.fetchval(
+                        "SELECT 1 FROM pg_extension WHERE extname = 'vector'"
+                    )
+                    if present:
+                        self._has_pgvector = True
+            self._initialized = True
+            return
 
         async with pool.acquire() as conn:
             # ── Schema (no-op for `public`; needed for custom schemas
@@ -885,6 +908,12 @@ class AsyncPostgreSQLAdapter(AsyncStorageAdapter):
         if self._embedding_dims is not None:
             return
         self._embedding_dims = dims
+
+        if not self._manage_schema:
+            # Externally-managed schema: the vector index is provisioned out of
+            # band. Never emit CREATE INDEX. (Caching dims above prevents this
+            # from re-checking on every embedding write.)
+            return
 
         index_type = "hnsw" if dims <= self._HNSW_MAX_DIMS else "ivfflat"
         index_name = f"idx_mb_embeddings_vec_{index_type}"
