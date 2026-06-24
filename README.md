@@ -4,6 +4,11 @@
   <p align="center">Typed blocks · Knowledge graph · Hybrid search · Encryption · Decay engine — all local, all yours.</p>
   <p align="center"><a href="https://memblock.xyz">memblock.xyz</a></p>
 </p>
+<p align="center">
+  <a href="https://pypi.org/project/memblock/"><img src="https://img.shields.io/pypi/v/memblock.svg" alt="PyPI version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://pypi.org/project/memblock/"><img src="https://img.shields.io/pypi/pyversions/memblock.svg" alt="Python versions"></a>
+</p>
 
 ---
 
@@ -75,6 +80,16 @@ pip install "memblock[all]"                 # Everything including local embeddi
 
 Full docs, API reference, and examples: **[memblock.xyz](https://memblock.xyz)**
 
+## Contributing
+
+Contributions are welcome! MemBlock is open source and community-driven.
+
+- Found a bug or have a feature idea? [Open an issue](https://github.com/iexcalibur/memblock/issues).
+- Want to contribute code? Fork the repo, create a branch, and open a pull request.
+- Please make sure tests pass and follow the existing code style.
+
+The `main` branch is protected, so all changes go through pull requests and review.
+
 ## License
 
-Proprietary. Copyright (c) 2025-2026 iexcalibur. All Rights Reserved.
+Released under the [MIT License](LICENSE). Copyright (c) 2025-2026 iexcalibur.
