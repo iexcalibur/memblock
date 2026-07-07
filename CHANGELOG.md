@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.13.1
+
+### Fixed — package metadata
+
+- **Corrected PyPI metadata.** The published `0.13.0` artifacts predated the metadata fix, so PyPI displayed `Author: None` and `License: Proprietary`. This release republishes with the correct `authors = [{name = "iexcalibur", …}]` and the **MIT** license (`license` field + `License :: OSI Approved :: MIT License` classifier). PyPI versions are immutable, so a new version is required to surface the corrected metadata. No code changes.
+- **Synced `__version__`.** `memblock.__version__` was stale at `0.12.1` (never bumped for the `0.13.0` release); it now matches the package version.
+
 ## v0.13.0
 
 ### Added — externally-managed schema (run under a DML-only database role)
