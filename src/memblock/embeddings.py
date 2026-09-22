@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import struct
+import sys
 from abc import ABC, abstractmethod
 from typing import Callable
 
@@ -204,6 +205,112 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     norm_a = math.sqrt(sum(x * x for x in a)) or 1.0
     norm_b = math.sqrt(sum(x * x for x in b)) or 1.0
     return dot / (norm_a * norm_b)
+
+
+def _brute_force_similarity_python(
+    query_vec: list[float],
+    embeddings: list[tuple[str, bytes]],
+) -> list[tuple[str, float]]:
+    """Pure-Python reference path for `brute_force_similarity`.
+
+    One `cosine_similarity` call per row; stable sort so ties keep
+    their input order.
+    """
+    scored = []
+    for block_id, blob in embeddings:
+        score = cosine_similarity(query_vec, unpack_embedding(blob))
+        if score != score:  # NaN (corrupt embedding): rank last, like the numpy path
+            score = float("-inf")
+        scored.append((block_id, score))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored
+
+
+def _brute_force_similarity_numpy(
+    query_vec: list[float],
+    embeddings: list[tuple[str, bytes]],
+) -> list[tuple[str, float]] | None:
+    """Vectorised path for `brute_force_similarity`.
+
+    Returns None when numpy is unavailable or the input cannot be
+    stacked into one matrix (mixed blob lengths, or a blob whose
+    length does not match the query dimension); the caller then falls
+    back to the pure-Python loop. numpy is an optional accelerator,
+    never a hard dependency.
+    """
+    # `pack_embedding` uses struct '{n}f' — NATIVE float32 byte order.
+    # We read the blobs back as explicit little-endian '<f4', which is
+    # only equivalent on little-endian hosts; anything else takes the
+    # portable Python path.
+    if sys.byteorder != "little":
+        return None
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+
+    dims = len(query_vec)
+    if dims == 0:
+        return None
+    expected_len = dims * 4
+    blobs = [blob for _, blob in embeddings]
+    if any(len(blob) != expected_len for blob in blobs):
+        return None
+
+    # One contiguous buffer -> (n, dims) matrix. Equivalent to stacking a
+    # per-row np.frombuffer, but a single allocation instead of n. We
+    # widen to float64 so the arithmetic matches the Python reference
+    # (which sums float32 values as Python floats) to ~1e-15, keeping
+    # both paths' orderings identical.
+    matrix = (
+        np.frombuffer(b"".join(blobs), dtype="<f4")
+        .reshape(len(blobs), dims)
+        .astype(np.float64)
+    )
+    query = np.asarray(query_vec, dtype=np.float64)
+
+    # Same zero-norm guard as `cosine_similarity`: a zero vector gets
+    # norm 1.0 (score 0.0) rather than a division by zero.
+    row_norms = np.sqrt(np.einsum("ij,ij->i", matrix, matrix))
+    row_norms[row_norms == 0.0] = 1.0
+    query_norm = float(np.sqrt(query @ query)) or 1.0
+
+    scores = (matrix @ query) / (row_norms * query_norm)
+    # NaN (corrupt embedding) ranks last on both paths.
+    scores = np.where(np.isnan(scores), -np.inf, scores)
+
+    # Descending, stable: ties keep input order exactly like the Python
+    # path's `list.sort(reverse=True)`. `.tolist()` hands back plain
+    # Python floats/ints in one shot (per-element numpy scalar indexing
+    # was the single most expensive step at 10k rows).
+    order = np.argsort(-scores, kind="stable").tolist()
+    score_list = scores.tolist()
+    ids = [block_id for block_id, _ in embeddings]
+    return [(ids[i], score_list[i]) for i in order]
+
+
+def brute_force_similarity(
+    query_vec: list[float],
+    embeddings: list[tuple[str, bytes]],
+) -> list[tuple[str, float]]:
+    """Cosine similarity of `query_vec` against every packed embedding.
+
+    Returns ALL `(block_id, score)` pairs sorted by score descending
+    (stable on ties). Uses a single numpy matmul when numpy is importable
+    and every blob has the query's dimension; otherwise (numpy missing,
+    big-endian host, or mixed-length blobs) it runs the pure-Python
+    `cosine_similarity` loop. Both paths agree to within 1e-5 and
+    produce the same ordering.
+
+    This is the Python-side fallback used by the query engines when the
+    storage adapter has no server-side vector search (i.e. not pgvector).
+    """
+    if not embeddings:
+        return []
+    result = _brute_force_similarity_numpy(query_vec, embeddings)
+    if result is None:
+        result = _brute_force_similarity_python(query_vec, embeddings)
+    return result
 
 
 def rrf_merge(

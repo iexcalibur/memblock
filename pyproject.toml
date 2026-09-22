@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memblock"
-version = "0.13.1"
+version = "0.13.2"
 description = "Typed block tree + knowledge graph memory SDK for AI agents"
 readme = "README.md"
 license = {text = "MIT"}
@@ -54,6 +54,7 @@ llm = [
     "google-genai>=1.0",
 ]
 embeddings = ["fastembed>=0.3"]
+fast = ["numpy>=1.24"]  # optional accelerator for the SQLite brute-force vector search
 embeddings-openai = ["httpx>=0.24"]
 embeddings-gemini = ["httpx>=0.24"]
 llm-gemini = ["google-genai>=1.0"]

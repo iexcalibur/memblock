@@ -81,7 +81,19 @@ class AsyncStorageAdapter(ABC):
         self, filters: dict[str, Any],
     ) -> list[Block]:
         """Query blocks with the same filter shape as
-        `StorageAdapter.query_blocks`."""
+        `StorageAdapter.query_blocks`.
+
+        Ordering / limit contract (identical across adapters):
+
+        - ``sort_by``: ``"created_at"`` (default for non-text queries),
+          ``"access_count"``, ``"confidence"``, or ``"relevance"``. For
+          ``text_search`` queries, ``sort_by`` absent or ``"relevance"``
+          orders by full-text rank (best match first, newest first on
+          ties); the explicit sorts keep their usual ORDER BY.
+        - ``limit``: the SQL LIMIT. It is applied after every WHERE
+          condition (type, session_id, tags, min_confidence, ...), so a
+          filtered ``text_search`` never under-fills.
+        """
         ...
 
     @abstractmethod

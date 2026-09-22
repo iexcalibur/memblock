@@ -880,7 +880,10 @@ class MemBlock:
             text_search: Full-text search (FTS + optional vector hybrid)
             related_to: Block ID — find graph-connected blocks
             min_confidence: Minimum confidence threshold
-            sort_by: 'relevance', 'recency', 'access_count', 'strength'
+            sort_by: 'relevance', 'recency', 'access_count', 'strength'.
+                With text_search the candidates are the top max(limit*5, 50)
+                keyword-ranked matches (newest / most-accessed matches for
+                'recency' / 'access_count'); 'strength' considers every match.
             limit: Maximum results
             include_decayed: Include blocks below `min_strength` (default False)
             min_strength: Minimum decayed-strength score (0.0-1.0) — filters

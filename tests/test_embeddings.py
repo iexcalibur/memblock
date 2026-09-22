@@ -321,3 +321,14 @@ class TestHybridSearch:
         python_results = [r for r in results if "Python" in r.content]
         assert len(python_results) >= 1
         mem.close()
+
+
+class TestWeightedRRFEmptyVec:
+    def test_fts_only_curve_is_strictly_decreasing_and_empty_is_empty(self):
+        from memblock.embeddings import weighted_rrf_merge
+
+        merged = weighted_rrf_merge(["A", "B", "C"], [], None, k=3)
+        assert [bid for bid, _ in merged] == ["A", "B", "C"]
+        scores = [s for _, s in merged]
+        assert scores[0] > scores[1] > scores[2] > 0
+        assert weighted_rrf_merge([], [], None) == []

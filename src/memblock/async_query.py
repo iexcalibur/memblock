@@ -18,8 +18,34 @@ from typing import Any
 
 from memblock.block import Block
 from memblock.decay import DecayEngine
+from memblock.embeddings import weighted_rrf_merge
 from memblock.storage.async_base import AsyncStorageAdapter
 from memblock.types import BlockType
+
+
+# Engine-level sort_by -> storage sort_by for the text-search candidate pool.
+# Explicit recency / access_count sorts ask storage for the same ordering, so
+# the pool holds the newest / most-accessed matches (v0.13.1 semantics,
+# bounded to the pool); "relevance" and "strength" take the best keyword
+# matches.
+_STORAGE_SORT_FOR_TEXT_SEARCH: dict[str, str] = {
+    "recency": "created_at",
+    "access_count": "access_count",
+}
+
+# RRF constant for the FTS-only relevance curve (no vector signal). The
+# default k=60 is so flat after normalisation (rank 0 -> 1.0, rank 1 -> 0.984)
+# that the 0.70-weighted keyword term moved the final score by ~0.01 per rank
+# while recency + strength alone can swing it by 0.10, so any fresh one-token
+# match outranked an older exact match. With k=3 (rank 1 -> 0.80, rank 2 ->
+# 0.67, rank 9 -> 0.31) the best keyword match beats recency/strength at any
+# age for equal confidence; a much higher-confidence block can still edge
+# out an adjacent rank. The hybrid path keeps the standard k=60 because the
+# vector side supplies score magnitude there.
+_FTS_ONLY_RRF_K = 3
+
+
+from memblock.query import _block_matches_filters  # noqa: E402  (shared filter check)
 
 
 class AsyncQueryEngine:
@@ -99,6 +125,11 @@ class AsyncQueryEngine:
                 pass
 
         # ── Step 1: Get candidate blocks from storage
+        # For text searches the storage layer ranks by full-text relevance
+        # (bm25 / ts_rank) and returns only the top `pool` rows — the same
+        # pool _hybrid_search re-ranks. Non-text queries keep the full set:
+        # the Python-side strength sort needs it.
+        pool = max(limit * 5, 50)
         filters: dict[str, Any] = {}
         if type is not None:
             filters["type"] = type
@@ -106,6 +137,11 @@ class AsyncQueryEngine:
             filters["tags"] = tags
         if cleaned_text_search:
             filters["text_search"] = cleaned_text_search
+            filters["sort_by"] = _STORAGE_SORT_FOR_TEXT_SEARCH.get(sort_by, "relevance")
+            if sort_by != "strength":
+                # "strength" has no SQL equivalent and must see every match
+                # (v0.13.1 semantics); every other sort works on the pool.
+                filters["limit"] = pool
         if min_confidence > 0:
             filters["min_confidence"] = min_confidence
         if session_id is not None:
@@ -122,6 +158,16 @@ class AsyncQueryEngine:
 
         candidates = await self.storage.query_blocks(filters)
 
+        # A temporal window inferred from the query text ("last week",
+        # "10 days ago") is advisory, not a user-supplied filter: if it
+        # leaves no candidates at all — every memory predates the window,
+        # or blocks carry no happened_at — retry without it rather than
+        # return nothing. Explicit filters are never relaxed.
+        if temporal_filters and not candidates:
+            for key in temporal_filters:
+                filters.pop(key, None)
+            candidates = await self.storage.query_blocks(filters)
+
         # ── Step 1b: Hybrid search — FTS results + vector similarity
         hybrid_boost: dict[str, float] = {}
         if (
@@ -130,9 +176,22 @@ class AsyncQueryEngine:
             and self._embedding_provider is not None
         ):
             hybrid_boost = await self._hybrid_search(
-                text_search, candidates, max(limit * 5, 50),
+                text_search, candidates, pool,
             )
-        normalized_hybrid = self._normalize_hybrid_scores(hybrid_boost)
+
+        if hybrid_boost:
+            normalized_hybrid = self._normalize_hybrid_scores(hybrid_boost)
+        elif cleaned_text_search:
+            # FTS-only (no provider, semantic=False, or no embeddings yet):
+            # the keyword rank order from storage must still drive scoring,
+            # otherwise `sem` is 0 for every block and results collapse to
+            # confidence/recency order. RRF over the FTS order alone with a
+            # steep k (see _FTS_ONLY_RRF_K); first candidate normalises to 1.0.
+            # Kept out of `hybrid_boost` so the "add vec-only blocks" step
+            # below does not re-fetch blocks the strength filter dropped.
+            normalized_hybrid = self._fts_only_curve(candidates)
+        else:
+            normalized_hybrid = {}
 
         # ── Step 2: Graph proximity boost when `related_to` is set
         graph_boost: dict[str, float] = {}
@@ -150,7 +209,7 @@ class AsyncQueryEngine:
                     self.storage.get_block(bid) for bid in depth_map
                 ])
                 for block in fetched:
-                    if block and not block.deleted:
+                    if block and not block.deleted and _block_matches_filters(block, filters):
                         candidates.append(block)
 
         # ── Step 3: Strength filtering
@@ -163,18 +222,51 @@ class AsyncQueryEngine:
                 continue
             scored.append((block, strength))
 
-        # If hybrid found blocks not in FTS results, fetch + add them
+        # Refill: the text-search pool was cut in SQL before this Python-side
+        # min_strength filter ran. If decayed top matches emptied the pool so
+        # that `limit` can no longer be filled although the pool was full,
+        # fall back to the full match set (v0.13.1 behaviour) so decayed
+        # best matches never hide live weaker ones.
+        if (
+            "limit" in filters
+            and min_strength > 0
+            and not include_decayed
+            and len(scored) < limit
+            and len(candidates) >= filters["limit"]
+        ):
+            full_filters = {k: v for k, v in filters.items() if k != "limit"}
+            candidates = await self.storage.query_blocks(full_filters)
+            if cleaned_text_search and not hybrid_boost:
+                normalized_hybrid = self._fts_only_curve(candidates)
+            scored = []
+            for block in candidates:
+                if block.deleted and not include_decayed:
+                    continue
+                strength = self.decay.calculate_strength(block)
+                if strength < min_strength and not include_decayed:
+                    continue
+                scored.append((block, strength))
+
+        # If hybrid found blocks not in FTS results, fetch + add them.
+        # `hybrid_boost` is in merged-score order and (on the Python vector
+        # fallback) carries a cosine bonus for EVERY embedded block, so only
+        # its top `pool` entries are hydrated: anything below them trails at
+        # least `pool` higher-scoring blocks on the 0.70-weighted term and
+        # cannot realistically reach the top `limit` (pool >= 5 * limit).
+        # Without this cap a hybrid query on a non-pgvector store called
+        # get_block once per embedded block (O(N) per query).
         if hybrid_boost:
             candidate_ids = {b.id for b, _ in scored}
             missing_ids = [
-                bid for bid in hybrid_boost if bid not in candidate_ids
+                bid for bid in list(hybrid_boost)[:pool]
+                if bid not in candidate_ids
             ]
             if missing_ids:
                 fetched = await asyncio.gather(*[
                     self.storage.get_block(bid) for bid in missing_ids
                 ])
                 for block in fetched:
-                    if block and not block.deleted:
+                    if block and not block.deleted and _block_matches_filters(block, filters):
                         strength = self.decay.calculate_strength(block)
                         if strength >= min_strength or include_decayed:
                             scored.append((block, strength))
@@ -233,6 +325,17 @@ class AsyncQueryEngine:
 
     # ─── Internal helpers ────────────────────────────────────────────
 
+    def _fts_only_curve(self, candidates: list[Block]) -> dict[str, float]:
+        """Relevance curve from the storage (bm25 / ts_rank) order alone.
+
+        Used when no vector signal exists; see _FTS_ONLY_RRF_K. The first
+        candidate normalises to 1.0.
+        """
+        fts_only = dict(weighted_rrf_merge(
+            [b.id for b in candidates], [], None, k=_FTS_ONLY_RRF_K,
+        ))
+        return self._normalize_hybrid_scores(fts_only)
+
     def _normalize_hybrid_scores(
         self, hybrid_boost: dict[str, float],
     ) -> dict[str, float]:
@@ -263,9 +366,7 @@ class AsyncQueryEngine:
         """
         from memblock.embeddings import (
             EmbeddingProvider,
-            cosine_similarity,
-            weighted_rrf_merge,
-            unpack_embedding,
+            brute_force_similarity,
             pack_embedding,
         )
 
@@ -293,21 +394,16 @@ class AsyncQueryEngine:
                 merged = weighted_rrf_merge(fts_ids, vec_ids, vec_scores)
                 return dict(merged)
 
-            # Python fallback
+            # Python fallback: brute-force cosine similarity (numpy matmul
+            # when available, pure Python otherwise) — all rows, sorted desc.
             all_embeddings = await self.storage.get_all_embeddings()
             if not all_embeddings:
                 return {}
 
-            vec_scored: list[tuple[str, float]] = []
-            vec_scores_map: dict[str, float] = {}
-            for block_id, emb_bytes in all_embeddings:
-                emb = unpack_embedding(emb_bytes)
-                score = cosine_similarity(query_vec, emb)
-                vec_scored.append((block_id, score))
-                vec_scores_map[block_id] = score
-
-            vec_scored.sort(key=lambda x: x[1], reverse=True)
+            vec_scored = brute_force_similarity(query_vec, all_embeddings)
             vec_ids = [bid for bid, _ in vec_scored[:limit]]
+            vec_scores_map = dict(vec_scored)
+
             merged = weighted_rrf_merge(fts_ids, vec_ids, vec_scores_map)
             return dict(merged)
 

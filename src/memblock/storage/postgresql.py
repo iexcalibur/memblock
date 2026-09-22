@@ -252,11 +252,18 @@ class PostgreSQLAdapter(StorageAdapter):
                 $$ LANGUAGE plpgsql
             """)
 
+            # Trigger names are unique PER TABLE, so the existence check is
+            # scoped to {schema}.memblock_blocks. Without the tgrelid scope,
+            # a trigger on any other schema's memblock_blocks in the same
+            # database would short-circuit creation here and leave this
+            # schema's content_tsv permanently NULL — silently breaking FTS.
             cur.execute(f"""
                 DO $$
                 BEGIN
                     IF NOT EXISTS (
-                        SELECT 1 FROM pg_trigger WHERE tgname = 'trg_memblock_tsv'
+                        SELECT 1 FROM pg_trigger
+                         WHERE tgname = 'trg_memblock_tsv'
+                           AND tgrelid = '{self.schema}.memblock_blocks'::regclass
                     ) THEN
                         CREATE TRIGGER trg_memblock_tsv
                         BEFORE INSERT OR UPDATE OF content
@@ -461,6 +468,36 @@ class PostgreSQLAdapter(StorageAdapter):
         self.save_block(block)
 
     def query_blocks(self, filters: dict[str, Any]) -> list[Block]:
+        sql, params = self._build_query_blocks_sql(filters)
+
+        with self.conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        return [self._row_to_block(row) for row in rows]
+
+    def _build_query_blocks_sql(
+        self, filters: dict[str, Any],
+    ) -> tuple[str, list[Any]]:
+        """Build the SELECT that `query_blocks` runs, without executing it.
+
+        Split out so tests can ``EXPLAIN`` the exact statement. Returns
+        ``(sql, params)`` for ``cursor.execute``.
+
+        Ordering contract (shared with the SQLite / async adapters):
+
+        - ``text_search`` with ``sort_by`` absent or ``"relevance"``:
+          full-text rank — ``ts_rank(content_tsv, tsquery) DESC``,
+          tiebreak ``created_at DESC`` — so the best keyword match comes
+          first rather than the newest row sharing a single token.
+        - explicit ``"created_at"`` / ``"access_count"`` / ``"confidence"``
+          keep their usual ORDER BY.
+        - no ``text_search``: unchanged (``created_at DESC`` by default).
+
+        ``limit`` is the SQL LIMIT of this same statement, so it applies
+        after every WHERE condition (type, session_id, tags, ...) and a
+        filtered text query never under-fills.
+        """
         conditions: list[str] = [f"b.user_id = %s"]
         params: list[Any] = [self.user_id]
 
@@ -527,6 +564,7 @@ class PostgreSQLAdapter(StorageAdapter):
             conditions.append("m.happened_at >= %s AND m.happened_at <= %s")
             params.extend([start.isoformat(), end.isoformat()])
 
+        ts_query: str | None = None
         if "text_search" in filters:
             # PostgreSQL full-text search using tsvector
             import re
@@ -536,17 +574,31 @@ class PostgreSQLAdapter(StorageAdapter):
                 ts_query = " | ".join(words)  # OR search
                 conditions.append("b.content_tsv @@ to_tsquery('english', %s)")
                 params.append(ts_query)
+            else:
+                # No searchable words: match nothing, like SQLite's MATCH '""'.
+                conditions.append("FALSE")
 
         where_clause = " AND ".join(conditions)
 
         # Sort
-        sort_by = filters.get("sort_by", "created_at")
+        sort_by = filters.get("sort_by")
         sort_map = {
             "created_at": "b.created_at DESC",
             "access_count": "m.access_count DESC",
             "confidence": "m.confidence DESC",
         }
-        order = sort_map.get(sort_by, "b.created_at DESC")
+        if ts_query is not None and sort_by in (None, "relevance"):
+            # Keyword relevance: best match first, newest first on ties.
+            # psycopg placeholders are positional, so the tsquery is passed
+            # a second time for ORDER BY. The WHERE match still drives the
+            # GIN index on content_tsv; only the matching rows get ranked.
+            order = (
+                "ts_rank(b.content_tsv, to_tsquery('english', %s)) DESC, "
+                "b.created_at DESC"
+            )
+            params.append(ts_query)
+        else:
+            order = sort_map.get(sort_by, "b.created_at DESC")
 
         sql = f"""
             SELECT b.*, m.confidence, m.source, m.created_at AS m_created_at,
@@ -564,11 +616,7 @@ class PostgreSQLAdapter(StorageAdapter):
             sql += " LIMIT %s"
             params.append(filters["limit"])
 
-        with self.conn.cursor() as cur:
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-
-        return [self._row_to_block(row) for row in rows]
+        return sql, params
 
     def get_all_blocks(self, include_deleted: bool = False) -> list[Block]:
         with self.conn.cursor() as cur:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime
 from typing import Any
@@ -285,6 +286,26 @@ class SQLiteAdapter(StorageAdapter):
         self.save_block(block)
 
     def query_blocks(self, filters: dict[str, Any]) -> list[Block]:
+        sql, params = self._build_query_sql(filters)
+        cur = self.conn.cursor()
+        cur.execute(sql, params)
+        return [self._row_to_block(row) for row in cur.fetchall()]
+
+    def _build_query_sql(self, filters: dict[str, Any]) -> tuple[str, list[Any]]:
+        """
+        Build the SELECT statement and parameter list for ``query_blocks``.
+
+        Kept separate from execution so callers (and tests) can inspect the
+        exact SQL with ``EXPLAIN QUERY PLAN``.
+
+        Ordering contract:
+        - ``text_search`` with ``sort_by`` absent or ``"relevance"`` orders by
+          FTS5 ``rank`` (ascending = best match first).
+        - explicit ``created_at`` / ``access_count`` / ``confidence`` keep their
+          usual ORDER BY, for text and non-text queries alike.
+        - ``limit`` is always applied after every WHERE condition, so a
+          filtered text search never under-fills.
+        """
         conditions: list[str] = []
         params: list[Any] = []
         use_fts = False
@@ -358,25 +379,31 @@ class SQLiteAdapter(StorageAdapter):
             # Sanitize FTS5 query: remove special characters, wrap terms in quotes
             raw_query = filters["text_search"]
             # Strip FTS5 special chars and split into words
-            import re
             words = re.findall(r'\w+', raw_query)
             fts_query = " OR ".join(f'"{w}"' for w in words) if words else '""'
 
         # Build query
         if use_fts:
+            # The FTS MATCH lives in a derived table on the LEFT of a CROSS JOIN.
+            # SQLite honors CROSS JOIN as a loop-order hint, so the FTS5 scan is
+            # the outermost loop and the MATCH is evaluated exactly once.
+            #
+            # Do NOT rewrite this as `FROM blocks b ... INNER JOIN blocks_fts`:
+            # with a LIMIT the planner then drives from blocks via
+            # idx_blocks_deleted and re-runs the MATCH once per row, which is
+            # catastrophically slow on large tables (>150 s at 10k rows).
             sql = """
                 SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
                        m.created_by, m.access_count, m.last_accessed, m.decay_rate, m.ttl, m.session_id,
                        m.org_id, m.project_id, m.agent_id, m.custom_metadata,
                        m.happened_at, m.happened_at_end, m.temporal_precision
-                FROM blocks b
+                FROM (SELECT block_id, rank FROM blocks_fts WHERE blocks_fts MATCH ?) fts
+                CROSS JOIN blocks b ON b.id = fts.block_id
                 LEFT JOIN block_metadata m ON b.id = m.block_id
-                INNER JOIN blocks_fts fts ON b.id = fts.block_id
-                WHERE fts.blocks_fts MATCH ?
             """
             params.insert(0, fts_query)
             if conditions:
-                sql += " AND " + " AND ".join(conditions)
+                sql += " WHERE " + " AND ".join(conditions)
         else:
             sql = """
                 SELECT b.*, m.confidence, m.source, m.created_at as m_created_at,
@@ -390,22 +417,31 @@ class SQLiteAdapter(StorageAdapter):
                 sql += " WHERE " + " AND ".join(conditions)
 
         # Sort
-        sort_by = filters.get("sort_by", "created_at")
+        sort_by = filters.get("sort_by")
         sort_map = {
             "created_at": "b.created_at DESC",
             "access_count": "m.access_count DESC",
             "confidence": "m.confidence DESC",
         }
-        sql += f" ORDER BY {sort_map.get(sort_by, 'b.created_at DESC')}"
+        if use_fts and (sort_by is None or sort_by == "relevance"):
+            # FTS5 rank is -bm25: smaller (more negative) = better match.
+            # The created_at tiebreak makes equal-score matches come back
+            # newest first (an updated fact beats the stale one it
+            # superseded) and matches the Postgres adapters. It costs a temp
+            # b-tree over the matched rows (~3 ms -> ~8 ms at 10k rows /
+            # 2,800 matches) instead of FTS5's native rank sort; the FTS
+            # scan is still the single outer loop.
+            order_by = "fts.rank, b.created_at DESC"
+        else:
+            order_by = sort_map.get(sort_by, "b.created_at DESC")
+        sql += f" ORDER BY {order_by}"
 
-        # Limit
+        # Limit (applied after every WHERE condition, so filtered queries never under-fill)
         if "limit" in filters:
             sql += " LIMIT ?"
             params.append(filters["limit"])
 
-        cur = self.conn.cursor()
-        cur.execute(sql, params)
-        return [self._row_to_block(row) for row in cur.fetchall()]
+        return sql, params
 
     def get_all_blocks(self, include_deleted: bool = False) -> list[Block]:
         cur = self.conn.cursor()

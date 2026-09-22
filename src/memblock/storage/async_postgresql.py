@@ -624,11 +624,33 @@ class AsyncPostgreSQLAdapter(AsyncStorageAdapter):
         self, filters: dict[str, Any],
     ) -> list[Block]:
         """Query blocks. Mirrors `PostgreSQLAdapter.query_blocks`'
-        filter shape exactly.
+        filter shape and ordering contract exactly.
+        """
+        sql, params = self._build_query_blocks_sql(filters)
+
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+
+        return [self._row_to_block(row) for row in rows]
+
+    def _build_query_blocks_sql(
+        self, filters: dict[str, Any],
+    ) -> tuple[str, list[Any]]:
+        """Build the SELECT that `query_blocks` runs, without executing it.
 
         asyncpg uses `$1, $2, ...` placeholders (Postgres native);
         we build the parameter list and substitute placeholders by
-        index into the SQL string.
+        index into the SQL string. Split out so tests can ``EXPLAIN``
+        the exact statement. Returns ``(sql, params)`` for ``conn.fetch``.
+
+        Ordering contract (see `PostgreSQLAdapter._build_query_blocks_sql`):
+        ``text_search`` with ``sort_by`` absent or ``"relevance"`` orders
+        by ``ts_rank`` DESC (tiebreak ``created_at`` DESC); explicit
+        ``"created_at"`` / ``"access_count"`` / ``"confidence"`` keep
+        their ORDER BY; non-text queries are unchanged. ``limit`` is the
+        SQL LIMIT of this same statement, so it applies after every WHERE
+        condition and a filtered text query never under-fills.
         """
         # Build conditions + parameter list
         conditions: list[str] = ["b.user_id = $1"]
@@ -702,22 +724,38 @@ class AsyncPostgreSQLAdapter(AsyncStorageAdapter):
             add("m.happened_at >= ?", start)
             add("m.happened_at <= ?", end)
 
+        ts_placeholder: str | None = None
         if "text_search" in filters:
             raw_query = filters["text_search"]
             words = re.findall(r"\w+", raw_query)
             if words:
                 ts_query = " | ".join(words)
                 add("b.content_tsv @@ to_tsquery('english', ?)", ts_query)
+                # `add` just appended the tsquery param; remember its $N so
+                # ORDER BY can reference the same parameter again.
+                ts_placeholder = f"${len(params)}"
+            else:
+                # No searchable words: match nothing, like SQLite's MATCH '""'.
+                conditions.append("FALSE")
 
         where_clause = " AND ".join(conditions)
 
-        sort_by = filters.get("sort_by", "created_at")
+        sort_by = filters.get("sort_by")
         sort_map = {
             "created_at": "b.created_at DESC",
             "access_count": "m.access_count DESC",
             "confidence": "m.confidence DESC",
         }
-        order = sort_map.get(sort_by, "b.created_at DESC")
+        if ts_placeholder is not None and sort_by in (None, "relevance"):
+            # Keyword relevance: best match first, newest first on ties.
+            # The WHERE match still drives the GIN index on content_tsv;
+            # only the matching rows get ranked.
+            order = (
+                f"ts_rank(b.content_tsv, to_tsquery('english', {ts_placeholder})) DESC, "
+                "b.created_at DESC"
+            )
+        else:
+            order = sort_map.get(sort_by, "b.created_at DESC")
 
         sql = f"""
             SELECT b.*,
@@ -736,11 +774,7 @@ class AsyncPostgreSQLAdapter(AsyncStorageAdapter):
             sql += f" LIMIT ${len(params) + 1}"
             params.append(filters["limit"])
 
-        pool = await self._ensure_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(sql, *params)
-
-        return [self._row_to_block(row) for row in rows]
+        return sql, params
 
     async def get_all_blocks(
         self, include_deleted: bool = False,

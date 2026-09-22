@@ -65,9 +65,30 @@ class StorageAdapter(ABC):
         - project_id: str (filter by project)
         - agent_id: str (filter by agent)
         - metadata_filters: dict (arbitrary key-value filters on custom_metadata)
+        - happened_after / happened_before: datetime
+        - temporal_range: tuple[datetime, datetime]
         - deleted: bool (default False)
         - limit: int
-        - sort_by: str (created_at, access_count, confidence)
+        - sort_by: str (relevance, created_at, access_count, confidence)
+
+        Ordering:
+        - With ``text_search``, ``sort_by`` absent or ``"relevance"`` orders by
+          full-text rank, best match first, newest first on ties (SQLite:
+          FTS5 ``rank`` ascending then ``created_at`` DESC; PostgreSQL:
+          ``ts_rank`` descending then ``created_at`` DESC). A ``text_search``
+          with no word characters matches nothing on every backend.
+          An explicit ``created_at`` / ``access_count`` / ``confidence`` keeps
+          its usual ordering.
+        - Without ``text_search``, ``"relevance"`` falls back to ``created_at``
+          DESC; ordering is otherwise unchanged.
+
+        Limit semantics:
+        - ``limit`` is the SQL LIMIT. For ``text_search`` queries it is applied
+          AFTER every WHERE condition (type, parent_id, min_confidence, tags,
+          session/org/project/agent, metadata_filters, temporal filters,
+          deleted), so a filtered query returns up to ``limit`` rows that satisfy
+          every filter, rather than the first ``limit`` full-text matches
+          truncated before filtering (which could under-fill).
         """
         ...
 

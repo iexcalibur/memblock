@@ -12,6 +12,24 @@ from memblock.storage.base import StorageAdapter
 from memblock.query import QueryEngine
 
 
+@pytest.fixture(autouse=True)
+def _restore_real_postgresql_module():
+    """``_make_adapter`` reloads ``memblock.storage.postgresql`` with a
+    ``MagicMock`` psycopg in ``sys.modules``. Reload it once more after each
+    test, with the real ``sys.modules``, so the module's ``psycopg`` global
+    is the genuine driver again for later live-Postgres tests in the same
+    session (before this, ``adapter.conn`` in those tests returned a
+    MagicMock)."""
+    yield
+    import importlib
+    import types
+
+    import memblock.storage.postgresql as pg_mod
+
+    if not isinstance(getattr(pg_mod, "psycopg", None), types.ModuleType):
+        importlib.reload(pg_mod)
+
+
 # ─── Base class stub ──────────────────────────────────────────────────────
 
 
