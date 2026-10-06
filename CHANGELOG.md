@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.14.0
+
+### Added — pluggable memory classifier (`MemBlock(classifier=...)`)
+
+- **`memblock/classifier.py`**: a duck-typed contract for a classifier that decides a memory's
+  fields (`type`, `source`, `confidence`, `encryption_level`, `decay_rate`, `temporal_precision`,
+  `tags`) and optionally the conflict action against similar blocks. `store()` now defaults
+  `type`, `confidence`, `source` and `encryption_level` to `None` and fills them from the
+  classifier when set; explicit arguments always win, and the old defaults (FACT / 1.0 /
+  EXPLICIT / NONE) apply when no classifier is configured. A classifier returning `skip=True`
+  drops the memory (returns `None`, like `DuplicatePolicy.SKIP`).
+- **Escalation**: when the classifier reports low confidence (`escalate=True`) and an
+  `extract_provider` is configured, `store()` asks the LLM to classify the sentence
+  (`classifier.llm_classify`) and applies its answer. Disable with `classifier_escalate=False`.
+- **Conflict gate**: with `conflict_resolution=True`, the classifier's `resolve_conflict` is
+  consulted first; the LLM `ConflictResolver` runs only when the classifier escalates or is not
+  available. Conflicts now also run without an embedding provider (FTS candidates) when a
+  classifier is present. Disable with `classifier_conflicts=False`.
+- **Audit**: every classifier decision, the LLM override if any, and which path decided the
+  conflict are written to the block's `custom_metadata["_classifier"]`, so they are queryable
+  with `metadata_filters` and covered by the op-log hash chain.
+- Reference implementation: `jevblock.memblock_bridge.MemoryClassifier` (System One typed
+  decisions over Laya / Laya-MLX / Claude / OpenAI).
+
+### Added — bring your own embedding provider
+- **`MemBlock(embeddings=<EmbeddingProvider instance>)`.** Any object implementing `memblock.embeddings.EmbeddingProvider` (a local model behind your own server, a cached wrapper, a test stub) can be passed directly instead of `True` / a provider name.
+
+### Fixed — SQLite updates no longer erase a block's embedding and graph edges
+- **`SQLiteAdapter.save_block` is now a real upsert (`INSERT … ON CONFLICT(id) DO UPDATE`).** It used `INSERT OR REPLACE`, which deletes the old row first; with foreign keys on, that delete cascaded to `block_embeddings` and `edges`, so every update — including the access count a plain `get()` records — silently erased the block's vector and its links. Reading a memory degraded it to keyword-only retrieval (found by arrowOS's retrieval bench). Regression test: `tests/test_embedding_survives_update.py`.
+
+### Tests
+- New: `tests/test_classifier.py` (classifier contract, explicit-argument precedence, skip, escalation, conflict gate, audit record) and `tests/test_embedding_survives_update.py`. Full suite: 791 passed with live Postgres.
+
 ## v0.13.2
 
 ### Fixed — retrieval ranking and query latency

@@ -44,6 +44,28 @@ mem.link(results[0].id, other.id, relation="related_to")
 mem.verify()
 ```
 
+## Pluggable classifier (typed decisions on the write path)
+
+Let a local System One model decide type, source, calibrated confidence, encryption level and
+decay rate for every memory, and gate conflict resolution before the LLM resolver runs:
+
+```python
+from memblock import MemBlock
+from jevblock import LayaMLXRouterBackend            # or AnthropicBackend / OpenAIBackend / StubBackend
+from jevblock.memblock_bridge import MemoryClassifier
+
+mem = MemBlock(storage="sqlite:///memory.db",
+               classifier=MemoryClassifier(LayaMLXRouterBackend()),
+               extract_provider="anthropic",          # optional: LLM escalation for low-confidence cases
+               conflict_resolution=True)
+
+block = mem.store("User prefers Python over JavaScript")   # type=PREFERENCE, confidence calibrated
+block.metadata.custom_metadata["_classifier"]               # full audit of the decision
+```
+
+Explicit `store()` arguments always win over the classifier. See `memblock/classifier.py` for
+the contract and `CHANGELOG.md` for details.
+
 ## Async (asyncio)
 
 ```python

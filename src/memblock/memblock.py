@@ -72,7 +72,7 @@ class MemBlock:
         encryption_key: str | None = None,
         author: str = "agent",
         user_id: str = "default",
-        embeddings: bool | str = False,
+        embeddings: "bool | str | EmbeddingProvider" = False,
         embeddings_api_key: str | None = None,
         embeddings_model: str | None = None,
         on_duplicate: DuplicatePolicy | str | None = None,
@@ -98,6 +98,9 @@ class MemBlock:
         analytics_noise_words: set[str] | None = None,
         pool: Any = None,
         manage_schema: bool = True,
+        classifier: Any = None,
+        classifier_conflicts: bool = True,
+        classifier_escalate: bool = True,
     ) -> None:
         """
         Initialize MemBlock.
@@ -252,6 +255,12 @@ class MemBlock:
                 max_workers=background_extract_workers,
             )
         self._conflict_resolution = conflict_resolution
+        # Pluggable memory classifier (see memblock/classifier.py). When set, store() fills
+        # type/source/confidence/encryption_level/decay_rate the caller left unset from the
+        # classifier's decision, and conflict resolution consults it before the LLM resolver.
+        self._classifier = classifier
+        self._classifier_conflicts = bool(classifier_conflicts)
+        self._classifier_escalate = bool(classifier_escalate)
         self._conflict_resolver = None  # Lazy-initialized
         self._extracting = False  # Prevents infinite recursion (sync mode, main thread)
         self._thread_local = threading.local()  # Per-thread extracting state
@@ -305,6 +314,11 @@ class MemBlock:
         """Create an embedding provider based on the embeddings parameter."""
         if embeddings is False:
             return None
+
+        from memblock.embeddings import EmbeddingProvider
+        if isinstance(embeddings, EmbeddingProvider):
+            # A provider the application brings (e.g. a local model behind its own server)
+            return embeddings
 
         if embeddings is True:
             # Local embeddings via FastEmbed
@@ -462,12 +476,12 @@ class MemBlock:
     def store(
         self,
         content: str,
-        type: BlockType = BlockType.FACT,
-        confidence: float = 1.0,
-        source: SourceType = SourceType.EXPLICIT,
+        type: BlockType | None = None,
+        confidence: float | None = None,
+        source: SourceType | None = None,
         tags: list[str] | None = None,
         parent_id: str | None = None,
-        encryption_level: EncryptionLevel = EncryptionLevel.NONE,
+        encryption_level: EncryptionLevel | None = None,
         decay_rate: float | None = None,
         ttl: int | None = None,
         session_id: str | None = None,
@@ -484,9 +498,11 @@ class MemBlock:
 
         Args:
             content: The memory content text
-            type: Block type (FACT, PREFERENCE, EVENT, ENTITY, RELATION)
-            confidence: Confidence score (0.0-1.0)
-            source: How the memory was acquired
+            type: Block type (FACT, PREFERENCE, EVENT, ENTITY, RELATION).
+                Defaults to FACT, or to the classifier's decision when
+                `MemBlock(classifier=...)` is set and this is left unset.
+            confidence: Confidence score (0.0-1.0); default 1.0 or the classifier's calibrated value
+            source: How the memory was acquired; default EXPLICIT or the classifier's decision
             tags: Categorization tags
             parent_id: Parent block ID for tree structure
             encryption_level: NONE, STANDARD, or SENSITIVE
@@ -505,34 +521,87 @@ class MemBlock:
         Returns:
             The created Block, or None if duplicate with SKIP policy.
         """
+        # ── Pluggable classification (memblock/classifier.py) ──────────────────
+        # Fills whatever the caller left unset. Explicit arguments always win.
+        classifier_record: dict[str, Any] | None = None
+        if self._classifier is not None and not self._extracting and content:
+            (type, confidence, source, encryption_level, decay_rate, temporal_precision,
+             tags, classifier_record, skipped) = self._classify_for_store(
+                content, type, confidence, source, encryption_level, decay_rate, temporal_precision, tags,
+            )
+            if skipped:
+                return None  # type: ignore[return-value]
+            if classifier_record is not None:
+                from memblock.classifier import CLASSIFIER_METADATA_KEY
+                metadata = dict(metadata or {})
+                metadata[CLASSIFIER_METADATA_KEY] = classifier_record
+
+        if type is None:
+            type = BlockType.FACT
+        if confidence is None:
+            confidence = 1.0
+        if source is None:
+            source = SourceType.EXPLICIT
+        if encryption_level is None:
+            encryption_level = EncryptionLevel.NONE
+
         # Resolve per-type decay default when caller didn't override.
         if decay_rate is None:
             from memblock.decay import default_decay_rate_for
             decay_rate = default_decay_rate_for(type)
 
-        # Conflict resolution via LLM (if enabled)
+        # Conflict resolution: classifier first (fast, local), LLM resolver as the fallback
+        # for escalated or unsupported decisions.
+        llm_conflicts_possible = (
+            self._embedding_provider is not None and self._extract_provider_name is not None
+        )
+        classifier_conflicts_possible = (
+            self._classifier is not None and self._classifier_conflicts
+            and hasattr(self._classifier, "resolve_conflict")
+        )
         if (
             self._conflict_resolution
             and not self._extracting
-            and self._embedding_provider is not None
-            and self._extract_provider_name is not None
+            and (llm_conflicts_possible or classifier_conflicts_possible)
         ):
             try:
                 similar = self.query(
                     text_search=content,
-                    semantic=True,
+                    semantic=self._embedding_provider is not None,
                     limit=5,
                     session_id=session_id or self._session_id,
                 )
                 if similar:
-                    from memblock.conflict import ConflictResolver, ConflictActionType
-                    if self._conflict_resolver is None:
-                        extractor_provider = self._init_extractor().provider
-                        self._conflict_resolver = ConflictResolver(provider=extractor_provider)
-                    result = self._conflict_resolver.resolve(
-                        content, similar, new_block_type=type,
-                    )
-                    for action in result.actions:
+                    from memblock.conflict import ConflictAction, ConflictResolver, ConflictActionType
+                    actions: list[Any] = []
+                    decided_by = None
+                    if classifier_conflicts_possible:
+                        decisions = self._classifier.resolve_conflict(content, similar)
+                        if decisions and not any(d.get("escalate") for d in decisions):
+                            actions = [
+                                ConflictAction(action=ConflictActionType(d["action"]), block_id=d.get("block_id"),
+                                               new_content=content, reason="classifier")
+                                for d in decisions if d.get("action") != "ADD"
+                            ]
+                            decided_by = "classifier"
+                        if classifier_record is not None and decisions:
+                            classifier_record["conflict"] = [
+                                {k: v for k, v in d.items() if k != "record"} for d in decisions
+                            ]
+                    if decided_by is None and llm_conflicts_possible:
+                        if self._conflict_resolver is None:
+                            extractor_provider = self._init_extractor().provider
+                            self._conflict_resolver = ConflictResolver(provider=extractor_provider)
+                        result = self._conflict_resolver.resolve(
+                            content, similar, new_block_type=type,
+                        )
+                        actions = result.actions
+                        decided_by = "llm"
+                    if classifier_record is not None and decided_by:
+                        classifier_record["conflict_decided_by"] = decided_by
+                        metadata = dict(metadata or {})
+                        metadata[CLASSIFIER_METADATA_KEY] = classifier_record
+                    for action in actions:
                         if action.action == ConflictActionType.UPDATE and action.block_id:
                             self.update(action.block_id, content=action.new_content or content)
                             return self.get(action.block_id)  # type: ignore[return-value]
@@ -1199,6 +1268,64 @@ class MemBlock:
             return ExtractionResult(provider="none", errors=["No messages in buffer"])
 
         return self._run_extraction()
+
+    def _classify_for_store(
+        self, content, type, confidence, source, encryption_level, decay_rate, temporal_precision, tags,
+    ):
+        """Run the pluggable classifier and fill unset store() arguments from its decision.
+
+        Returns the (possibly updated) arguments plus the audit record and a skip flag.
+        Classifier failures never break store(): on any exception the arguments are returned
+        unchanged and no record is written.
+        """
+        from memblock.classifier import CLASSIFIER_FIELDS, Classification, llm_classify
+
+        try:
+            result = Classification.from_result(self._classifier.classify(content))
+        except Exception:
+            return type, confidence, source, encryption_level, decay_rate, temporal_precision, tags, None, False
+        if result is None:
+            return type, confidence, source, encryption_level, decay_rate, temporal_precision, tags, None, False
+
+        record: dict[str, Any] = {"classifier": getattr(self._classifier, "name", self._classifier.__class__.__name__),
+                                  "escalated": result.escalate, "applied": {}, **result.record}
+        if result.skip:
+            record["skipped"] = True
+            return type, confidence, source, encryption_level, decay_rate, temporal_precision, tags, record, True
+
+        fields = {k: v for k, v in result.fields.items() if k in CLASSIFIER_FIELDS}
+        extra = {k: v for k, v in result.fields.items() if k not in CLASSIFIER_FIELDS}
+        if extra:
+            record["extra"] = extra
+
+        # Escalate to the LLM provider when the classifier is unsure and one is configured.
+        if result.escalate and self._classifier_escalate and self._extract_provider_name is not None:
+            try:
+                override = llm_classify(self._init_extractor().provider, content)
+                record["llm"] = override
+                fields.update(override)
+            except Exception as e:  # LLM failure: keep the classifier's answer
+                record["llm_error"] = str(e)[:200]
+
+        def _enum(cls, v):
+            return v if isinstance(v, cls) else cls(v)
+
+        if type is None and "type" in fields:
+            type = _enum(BlockType, fields["type"]); record["applied"]["type"] = type.value
+        if confidence is None and "confidence" in fields:
+            confidence = float(fields["confidence"]); record["applied"]["confidence"] = confidence
+        if source is None and "source" in fields:
+            source = _enum(SourceType, fields["source"]); record["applied"]["source"] = source.value
+        if encryption_level is None and "encryption_level" in fields:
+            encryption_level = _enum(EncryptionLevel, fields["encryption_level"])
+            record["applied"]["encryption_level"] = encryption_level.value
+        if decay_rate is None and "decay_rate" in fields:
+            decay_rate = float(fields["decay_rate"]); record["applied"]["decay_rate"] = decay_rate
+        if temporal_precision == "exact" and "temporal_precision" in fields:
+            temporal_precision = str(fields["temporal_precision"]); record["applied"]["temporal_precision"] = temporal_precision
+        if tags is None and fields.get("tags"):
+            tags = list(fields["tags"]); record["applied"]["tags"] = tags
+        return type, confidence, source, encryption_level, decay_rate, temporal_precision, tags, record, False
 
     def _init_extractor(self) -> Any:
         """Lazily initialize the LLM extractor from configured params."""

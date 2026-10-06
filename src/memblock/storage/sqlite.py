@@ -156,11 +156,19 @@ class SQLiteAdapter(StorageAdapter):
     def save_block(self, block: Block) -> None:
         cur = self.conn.cursor()
 
+        # An upsert, never INSERT OR REPLACE: REPLACE deletes the old row first, and with foreign keys on, that
+        # delete cascaded to the block's embedding and its graph edges — every update, including the access
+        # count a plain get() records, silently erased the block's vector and its links.
         cur.execute(
-            """INSERT OR REPLACE INTO blocks
+            """INSERT INTO blocks
                (id, type, content, encryption_level, encrypted,
                 parent_id, children_ids, version, op_hash, tags, deleted, created_at, content_hash)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                type = excluded.type, content = excluded.content, encryption_level = excluded.encryption_level,
+                encrypted = excluded.encrypted, parent_id = excluded.parent_id, children_ids = excluded.children_ids,
+                version = excluded.version, op_hash = excluded.op_hash, tags = excluded.tags,
+                deleted = excluded.deleted, created_at = excluded.created_at, content_hash = excluded.content_hash""",
             (
                 block.id,
                 block.type.value,
