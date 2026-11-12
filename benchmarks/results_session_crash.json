@@ -1,0 +1,10 @@
+{
+ "trials": 400,
+ "violations": 0,
+ "outcomes": {
+  "clean:saved": 52,
+  "crash:not saved": 60,
+  "crash:saved": 288
+ },
+ "details": []
+}

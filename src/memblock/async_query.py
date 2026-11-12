@@ -45,7 +45,12 @@ _STORAGE_SORT_FOR_TEXT_SEARCH: dict[str, str] = {
 _FTS_ONLY_RRF_K = 3
 
 
-from memblock.query import _block_matches_filters  # noqa: E402  (shared filter check)
+from memblock.query import (  # noqa: E402  (shared with the sync engine)
+    TIME_WINDOW_MODES,
+    _block_matches_filters,
+    infer_time_window,
+    merge_time_window,
+)
 
 
 class AsyncQueryEngine:
@@ -100,29 +105,16 @@ class AsyncQueryEngine:
         project_id: str | None = None,
         agent_id: str | None = None,
         metadata_filters: dict[str, Any] | None = None,
+        time_window: str = "rank",
     ) -> list[Block]:
         """Query memory blocks. See `QueryEngine.query` for full
         param semantics."""
+        if time_window not in TIME_WINDOW_MODES:
+            raise ValueError(f"time_window must be one of {TIME_WINDOW_MODES}, got {time_window!r}")
 
         # ── Step 0: Temporal query parsing (extract time constraints
         # from text_search; pure Python).
-        temporal_filters: dict[str, Any] = {}
-        cleaned_text_search = text_search
-        if text_search:
-            try:
-                from memblock.temporal import TemporalQueryParser
-                parser = TemporalQueryParser()
-                constraint = parser.parse(text_search)
-                if constraint is not None:
-                    if constraint.after is not None:
-                        temporal_filters["happened_after"] = constraint.after
-                    if constraint.before is not None:
-                        temporal_filters["happened_before"] = constraint.before
-                    cleaned_text_search = (
-                        constraint.cleaned_query or text_search
-                    )
-            except ImportError:
-                pass
+        temporal_filters, cleaned_text_search = infer_time_window(text_search)
 
         # ── Step 1: Get candidate blocks from storage
         # For text searches the storage layer ranks by full-text relevance
@@ -154,17 +146,72 @@ class AsyncQueryEngine:
             filters["agent_id"] = agent_id
         if metadata_filters:
             filters["metadata_filters"] = metadata_filters
-        filters.update(temporal_filters)
 
+        # Steps 1b-4 (score and sort) run once, or twice when a time window
+        # inferred from the query text is used for ranking. The vector side
+        # of a hybrid search is computed once and shared.
+        options = dict(
+            text_search=text_search, cleaned_text_search=cleaned_text_search,
+            related_to=related_to, sort_by=sort_by, limit=limit, pool=pool,
+            include_decayed=include_decayed, min_strength=min_strength,
+            semantic=semantic, vector_memo={},
+        )
+        if not temporal_filters:
+            scored = await self._ranked(filters, {}, False, **options)
+        elif time_window == "filter" or sort_by != "relevance":
+            scored = await self._ranked(filters, temporal_filters, True, **options)
+        else:
+            # The window is a preference, not a filter: rank the blocks dated
+            # inside it, rank all blocks, and merge the two lists. An answer
+            # dated outside the window stays in the results.
+            inside = await self._ranked(filters, temporal_filters, False, **options)
+            overall = await self._ranked(filters, {}, False, **options)
+            scored = merge_time_window(inside, overall) if inside else overall
+
+        # ── Step 5: Reranker (best-effort, async-via-to_thread)
+        if text_search and self._reranker is not None:
+            try:
+                from memblock.rerankers import Reranker
+                if isinstance(self._reranker, Reranker):
+                    wider = [block for block, _ in scored[: limit * 3]]
+                    return await asyncio.to_thread(
+                        self._reranker.rerank, text_search, wider, limit,
+                    )
+            except Exception:
+                pass
+
+        # ── Step 6: Apply limit
+        return [block for block, _ in scored[:limit]]
+
+    async def _ranked(
+        self,
+        filters: dict[str, Any],
+        time_filters: dict[str, Any],
+        relax_empty_window: bool,
+        *,
+        text_search: str | None,
+        cleaned_text_search: str | None,
+        related_to: str | None,
+        sort_by: str,
+        limit: int,
+        pool: int,
+        include_decayed: bool,
+        min_strength: float,
+        semantic: bool,
+        vector_memo: dict,
+    ) -> list[tuple[Block, float]]:
+        """Fetch candidates, score them and sort them: `(block, strength)`
+        pairs in result order, before the reranker and the limit. See
+        `QueryEngine._ranked`."""
+        filters = {**filters, **time_filters}
         candidates = await self.storage.query_blocks(filters)
 
-        # A temporal window inferred from the query text ("last week",
-        # "10 days ago") is advisory, not a user-supplied filter: if it
-        # leaves no candidates at all — every memory predates the window,
-        # or blocks carry no happened_at — retry without it rather than
-        # return nothing. Explicit filters are never relaxed.
-        if temporal_filters and not candidates:
-            for key in temporal_filters:
+        # A window inferred from the query text is dropped when it leaves no
+        # candidates at all (every memory predates it, or blocks carry no
+        # happened_at) rather than returning nothing. Explicit filters are
+        # never relaxed.
+        if time_filters and relax_empty_window and not candidates:
+            for key in time_filters:
                 filters.pop(key, None)
             candidates = await self.storage.query_blocks(filters)
 
@@ -176,7 +223,7 @@ class AsyncQueryEngine:
             and self._embedding_provider is not None
         ):
             hybrid_boost = await self._hybrid_search(
-                text_search, candidates, pool,
+                text_search, candidates, pool, vector_memo,
             )
 
         if hybrid_boost:
@@ -308,20 +355,7 @@ class AsyncQueryEngine:
 
             scored.sort(key=relevance_score, reverse=True)
 
-        # ── Step 5: Reranker (best-effort, async-via-to_thread)
-        if text_search and self._reranker is not None:
-            try:
-                from memblock.rerankers import Reranker
-                if isinstance(self._reranker, Reranker):
-                    wider = [block for block, _ in scored[: limit * 3]]
-                    return await asyncio.to_thread(
-                        self._reranker.rerank, text_search, wider, limit,
-                    )
-            except Exception:
-                pass
-
-        # ── Step 6: Apply limit
-        return [block for block, _ in scored[:limit]]
+        return scored
 
     # ─── Internal helpers ────────────────────────────────────────────
 
@@ -353,8 +387,39 @@ class AsyncQueryEngine:
         query: str,
         fts_candidates: list[Block],
         limit: int,
+        memo: dict | None = None,
     ) -> dict[str, float]:
         """FTS + vector hybrid search via Weighted RRF.
+
+        `memo` carries the vector ranking between calls made for the same
+        query, so the query is embedded and the vectors are searched once.
+        """
+        from memblock.embeddings import EmbeddingProvider
+
+        provider = self._embedding_provider
+        if not isinstance(provider, EmbeddingProvider):
+            return {}
+
+        try:
+            if memo is None:
+                memo = {}
+            if "vectors" not in memo:
+                memo["vectors"] = await self._vector_ranking(provider, query, limit)
+            if memo["vectors"] is None:
+                return {}
+            vec_ids, vec_scores = memo["vectors"]
+
+            fts_ids = [b.id for b in fts_candidates[:limit]]
+            return dict(weighted_rrf_merge(fts_ids, vec_ids, vec_scores))
+
+        except Exception:
+            return {}
+
+    async def _vector_ranking(
+        self, provider: Any, query: str, limit: int,
+    ) -> tuple[list[str], dict[str, float]] | None:
+        """The vector side of a hybrid search: block ids best first, and each
+        block's similarity. None when there is nothing to search.
 
         Embedding is generated via the provider's sync `.embed()`
         method wrapped in `asyncio.to_thread` (the call is HTTP, so
@@ -364,51 +429,29 @@ class AsyncQueryEngine:
         adapter supports it; otherwise falls back to brute-force
         cosine in Python over `get_all_embeddings`.
         """
-        from memblock.embeddings import (
-            EmbeddingProvider,
-            brute_force_similarity,
-            pack_embedding,
+        from memblock.embeddings import brute_force_similarity, pack_embedding
+
+        # Embed the query — sync HTTP, run in thread pool.
+        query_embeddings = await asyncio.to_thread(provider.embed, [query])
+        if not query_embeddings:
+            return None
+        query_vec = query_embeddings[0]
+
+        # pgvector path
+        server_results = await self.storage.search_similar_embeddings(
+            pack_embedding(query_vec), limit,
         )
+        if server_results:
+            return [bid for bid, _ in server_results], {bid: s for bid, s in server_results}
 
-        provider = self._embedding_provider
-        if not isinstance(provider, EmbeddingProvider):
-            return {}
+        # Python fallback: brute-force cosine similarity (numpy matmul
+        # when available, pure Python otherwise) — all rows, sorted desc.
+        all_embeddings = await self.storage.get_all_embeddings()
+        if not all_embeddings:
+            return None
 
-        try:
-            # Embed the query — sync HTTP, run in thread pool.
-            query_embeddings = await asyncio.to_thread(provider.embed, [query])
-            if not query_embeddings:
-                return {}
-            query_vec = query_embeddings[0]
-
-            fts_ids = [b.id for b in fts_candidates[:limit]]
-
-            # pgvector path
-            query_bytes = pack_embedding(query_vec)
-            server_results = await self.storage.search_similar_embeddings(
-                query_bytes, limit,
-            )
-            if server_results:
-                vec_ids = [bid for bid, _ in server_results]
-                vec_scores = {bid: s for bid, s in server_results}
-                merged = weighted_rrf_merge(fts_ids, vec_ids, vec_scores)
-                return dict(merged)
-
-            # Python fallback: brute-force cosine similarity (numpy matmul
-            # when available, pure Python otherwise) — all rows, sorted desc.
-            all_embeddings = await self.storage.get_all_embeddings()
-            if not all_embeddings:
-                return {}
-
-            vec_scored = brute_force_similarity(query_vec, all_embeddings)
-            vec_ids = [bid for bid, _ in vec_scored[:limit]]
-            vec_scores_map = dict(vec_scored)
-
-            merged = weighted_rrf_merge(fts_ids, vec_ids, vec_scores_map)
-            return dict(merged)
-
-        except Exception:
-            return {}
+        vec_scored = brute_force_similarity(query_vec, all_embeddings)
+        return [bid for bid, _ in vec_scored[:limit]], dict(vec_scored)
 
     async def _traverse_with_depth(
         self,

@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterator
 
 from memblock.block import Block
 from memblock.storage.base import StorageAdapter
@@ -34,9 +35,12 @@ class SQLiteAdapter(StorageAdapter):
     - blocks_fts: FTS5 virtual table for text search
     """
 
+    supports_atomic = True
+
     def __init__(self, db_path: str = ":memory:") -> None:
         self.db_path = db_path
         self._conn: sqlite3.Connection | None = None
+        self._atomic_depth = 0
 
     @property
     def adapter_type(self) -> str:
@@ -50,6 +54,32 @@ class SQLiteAdapter(StorageAdapter):
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
         return self._conn
+
+    def _commit(self) -> None:
+        """Commit a write, unless an `atomic()` block is holding commits back."""
+        if self._atomic_depth == 0:
+            self.conn.commit()
+
+    @contextmanager
+    def atomic(self) -> Iterator[None]:
+        """One database transaction for every write made inside the block.
+
+        Writes are committed together when the outermost block ends, or rolled
+        back together if it raises. Meant for short sections on the thread that
+        owns the write; a write from another thread during the block joins it.
+        """
+        self._atomic_depth += 1
+        try:
+            yield
+        except BaseException:
+            self._atomic_depth -= 1
+            if self._atomic_depth == 0:
+                self.conn.rollback()
+            raise
+        else:
+            self._atomic_depth -= 1
+            if self._atomic_depth == 0:
+                self.conn.commit()
 
     def initialize(self) -> None:
         """Create all tables and indexes."""
@@ -138,7 +168,7 @@ class SQLiteAdapter(StorageAdapter):
             );
         """)
 
-        self.conn.commit()
+        self._commit()
 
         # Run schema migrations
         from memblock.migrations import MigrationRunner
@@ -222,7 +252,7 @@ class SQLiteAdapter(StorageAdapter):
                 (block.id, block.content, " ".join(block.tags)),
             )
 
-        self.conn.commit()
+        self._commit()
 
     def get_block(self, block_id: str) -> Block | None:
         cur = self.conn.cursor()
@@ -246,7 +276,7 @@ class SQLiteAdapter(StorageAdapter):
         cur.execute("DELETE FROM blocks_fts WHERE block_id = ?", (block_id,))
         cur.execute("DELETE FROM block_metadata WHERE block_id = ?", (block_id,))
         cur.execute("DELETE FROM blocks WHERE id = ?", (block_id,))
-        self.conn.commit()
+        self._commit()
 
     def update_block(self, block_id: str, updates: dict[str, Any]) -> None:
         block = self.get_block(block_id)
@@ -492,7 +522,7 @@ class SQLiteAdapter(StorageAdapter):
                 edge.created_at.isoformat(),
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_edges(self, block_id: str, direction: str = "both") -> list[Edge]:
         cur = self.conn.cursor()
@@ -512,7 +542,7 @@ class SQLiteAdapter(StorageAdapter):
     def delete_edge(self, edge_id: str) -> None:
         cur = self.conn.cursor()
         cur.execute("DELETE FROM edges WHERE id = ?", (edge_id,))
-        self.conn.commit()
+        self._commit()
 
     def delete_edges_for_block(self, block_id: str) -> None:
         cur = self.conn.cursor()
@@ -520,7 +550,7 @@ class SQLiteAdapter(StorageAdapter):
             "DELETE FROM edges WHERE source_id = ? OR target_id = ?",
             (block_id, block_id),
         )
-        self.conn.commit()
+        self._commit()
 
     # ─── Operation Log ────────────────────────────────────────────────────
 
@@ -541,7 +571,7 @@ class SQLiteAdapter(StorageAdapter):
                 op.timestamp.isoformat(),
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_operations(self, block_id: str | None = None) -> list[Operation]:
         cur = self.conn.cursor()
@@ -570,7 +600,7 @@ class SQLiteAdapter(StorageAdapter):
             "INSERT OR REPLACE INTO block_embeddings (block_id, embedding) VALUES (?, ?)",
             (block_id, embedding),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_embedding(self, block_id: str) -> bytes | None:
         cur = self.conn.cursor()
@@ -594,7 +624,7 @@ class SQLiteAdapter(StorageAdapter):
     def delete_embedding(self, block_id: str) -> None:
         cur = self.conn.cursor()
         cur.execute("DELETE FROM block_embeddings WHERE block_id = ?", (block_id,))
-        self.conn.commit()
+        self._commit()
 
     # ─── Analytics Operations ─────────────────────────────────────────────
 
@@ -634,7 +664,7 @@ class SQLiteAdapter(StorageAdapter):
             CREATE INDEX IF NOT EXISTS idx_org_questions_freq ON org_questions(org_id, frequency_count DESC);
             CREATE INDEX IF NOT EXISTS idx_org_question_events_time ON org_question_events(org_id, asked_at);
         """)
-        self.conn.commit()
+        self._commit()
 
     def upsert_question(
         self, org_id: str, normalized_text: str, user_id: str, asked_at: Any,
@@ -687,7 +717,7 @@ class SQLiteAdapter(StorageAdapter):
             "INSERT INTO org_question_events (org_id, question_id, user_id, asked_at) VALUES (?, ?, ?, ?)",
             (org_id, question_id, user_id, asked_at_str),
         )
-        self.conn.commit()
+        self._commit()
 
         # Return the updated record
         cur.execute("SELECT * FROM org_questions WHERE id = ?", (question_id,))

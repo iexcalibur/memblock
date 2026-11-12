@@ -1,0 +1,34 @@
+{
+ "retrieval": "keyword + embeddings",
+ "embedding_model": "FastEmbedProvider:sentence-transformers/all-MiniLM-L6-v2:384",
+ "time_phrases_read_as_of": "the question's date",
+ "questions": 100,
+ "question_types": {
+  "knowledge-update": 15,
+  "multi-session": 23,
+  "single-session-assistant": 13,
+  "single-session-preference": 4,
+  "single-session-user": 13,
+  "temporal-reasoning": 32
+ },
+ "levels": {
+  "+0x": {
+   "recall_any@5": 0.96,
+   "recall_any@10": 0.99,
+   "ndcg@10": 0.9063,
+   "evidence_in_prompt": 0.94
+  },
+  "+1x": {
+   "recall_any@5": 0.92,
+   "recall_any@10": 0.97,
+   "ndcg@10": 0.8408,
+   "evidence_in_prompt": 0.89
+  },
+  "+3x": {
+   "recall_any@5": 0.87,
+   "recall_any@10": 0.93,
+   "ndcg@10": 0.7949,
+   "evidence_in_prompt": 0.87
+  }
+ }
+}

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from memblock.block import Block
 from memblock.types import Edge, Operation
@@ -26,6 +27,23 @@ class StorageAdapter(ABC):
     def run_migration_sql(self, sql: str, params: tuple | None = None) -> None:
         """Execute a migration SQL statement. Override in subclass."""
         pass
+
+    # ─── Grouped Writes ───────────────────────────────────────────────────
+
+    #: True when `atomic()` really groups writes into one database transaction.
+    supports_atomic: bool = False
+
+    @contextmanager
+    def atomic(self) -> Iterator[None]:
+        """Group the writes made inside the block into one database transaction:
+        all of them are kept, or (on an exception) none.
+
+        The default does nothing, so each write lands on its own. Adapters that
+        can do better override it and set `supports_atomic`. Callers must not
+        depend on it for correctness: `memblock.transactions` stays correct
+        without it by recovering half-applied work from its journal.
+        """
+        yield
 
     # ─── Block Operations ─────────────────────────────────────────────────
 

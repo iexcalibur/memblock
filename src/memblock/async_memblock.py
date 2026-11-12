@@ -991,6 +991,7 @@ class AsyncMemBlock:
         project_id: str | None = None,
         agent_id: str | None = None,
         metadata_filters: dict[str, Any] | None = None,
+        time_window: str = "rank",
     ) -> list[Block]:
         if not self._native_async:
             return await asyncio.to_thread(
@@ -1003,6 +1004,7 @@ class AsyncMemBlock:
                 session_id=session_id, org_id=org_id,
                 project_id=project_id, agent_id=agent_id,
                 metadata_filters=metadata_filters,
+                time_window=time_window,
             )
         await self._ensure_initialized()
         results = await self._async_query.query(
@@ -1016,6 +1018,7 @@ class AsyncMemBlock:
             project_id=project_id or self._project_id,
             agent_id=agent_id or self._agent_id,
             metadata_filters=metadata_filters,
+            time_window=time_window,
         )
         # ON_QUERY hook — fires after retrieval. Useful for audit /
         # query-pattern analytics. Payload mirrors sync MemBlock.

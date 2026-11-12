@@ -1,5 +1,106 @@
 # Changelog
 
+## v0.15.0
+
+### Added — a memory layer for any chat model
+
+- **`MemorySession`** (`memblock/session.py`). Sits between an app and any chat model. Each turn it
+  reads memory into the prompt, calls the model, then commits the finished turn to memory word for
+  word and drops it from the prompt, so the prompt stays about the same size however long the
+  conversation runs. `model` is any callable (or an object with `complete(system, user)`). Tool
+  calls are passed through; a chain of tool calls is one turn and is committed after the final
+  answer; a reply cut off by the length limit is not committed until a later turn completes.
+  `chat()`, `submit_tool_results()`, `commit_history()`, `ingest()`, `save_state()`, `load_state()`,
+  `set_memory_read()`, `recover()`, `fork()`.
+- **Verbatim episodes**: `BlockType.EPISODE` and `MemBlock.store_episode()`. An episode is the exact
+  text of a message or document chunk. It skips the classifier, conflict resolution and
+  deduplication, and never decays, so `prune()` never removes it.
+- **Grouped writes**: `with mem.transaction():` (`memblock/transactions.py`). New blocks are written
+  staged (invisible to queries) and changes to existing blocks are held back; everything becomes
+  visible together on publish, or is discarded on an exception. Publishing is one journal write
+  followed by steps that are safe to repeat, so a crash at any point ends in all-or-nothing after
+  `recover_transactions()`, on every storage adapter. Open transactions hold a lease so recovery
+  never removes the work of a writer that is still running.
+- **Receipts**: `store(..., receipt="id")`. Storing again under a receipt that was already applied
+  returns the first block and writes nothing. `MemBlock.receipt_status()`.
+- **Snapshots**: `MemBlock.snapshot()`, `restore()` and `fork()` (`memblock/snapshot.py`). A snapshot
+  is one file with a stamp: format, checksum and the embedding model that made its vectors. A file
+  that fails its checksum, or whose vectors come from another model, is refused
+  (`embeddings="drop"` / `"reembed"` to take the blocks anyway). Written via a temporary file.
+- **Embedding identity**: the store records which embedding model made its vectors. Opening it with
+  a different model raises `EmbeddingMismatchError` on first use (`on_embedding_mismatch="warn"` or
+  `"ignore"`); `MemBlock.reembed()` rebuilds the vectors.
+- **Experience memory** (`memblock/experience.py`): `BlockType.EXPERIENCE`, `ExperienceBank`
+  (`add`, `retrieve`, `learn` from a finished run with any LLM provider) and `TroubleDetector`.
+  `MemorySession(experience="start" | "on_trouble")` adds the best-matching experience to the
+  prompt before a task, or when tool results show the model is stuck (failures in a row, empty
+  results in a row, the same call repeated).
+- **`StorageAdapter.atomic()`**: one database transaction for the writes inside the block. Real on
+  SQLite; a no-op elsewhere (grouped writes do not depend on it).
+
+### Changed — a time phrase in a query ranks results instead of filtering them
+
+- `query(text_search=...)` reads a time phrase in the text ("last week", "recent", "in March") as a
+  `happened_at` window. Until now that window was a filter whenever any block fell inside it, so an
+  answer dated a little outside it was hidden. Now (`time_window="rank"`, the default) the blocks
+  inside the window and all blocks are ranked separately and the results alternate between the two
+  lists, the window's first. Memories from that period rank higher, and the block ranked r-th
+  overall is never placed later than position 2r, wherever it is dated.
+  `time_window="filter"` keeps the earlier behaviour. Results sorted by `recency`, `access_count`
+  or `strength` are filtered as before. Applies to `MemBlock.query`, `AsyncMemBlock.query` and
+  both query engines. A query with a time phrase now runs the keyword search twice; a hybrid query
+  still embeds the query and searches the vectors once.
+
+### Measured
+`benchmarks/session_bench.py` — no LLM calls, in-memory SQLite. Keyword search only unless a line
+says otherwise; the runs with embeddings (`--embeddings`) use the default local model
+(`all-MiniLM-L6-v2`). Result files: `benchmarks/results_session_*.json`.
+- **LongMemEval, 500 questions, history replayed turn by turn through `MemorySession`**: 246,764
+  messages committed, 246,764 stored; every store passes `verify()`. Session-level Recall@5 0.956,
+  Recall@10 0.982, NDCG@10 0.896, against 0.964 / 0.976 / 0.898 for the existing method (one block
+  per session, stored and queried directly) under the same settings. With default settings the
+  prompt gets at least one item from an answer session for 96.0% of questions, using a mean of
+  1,323 tokens of memory for a 122,324-token history.
+- **The same run with embeddings on**: Recall@5 0.984, Recall@10 0.992, NDCG@10 0.926, against
+  0.974 / 0.994 / 0.913 for the existing method (level: 10 questions gained, 5 lost). Every answer
+  session in the top 5: 0.892, up from 0.824 with keyword search. Preference questions found in the
+  top 5: 29 of 30, up from 21. Evidence reaches the prompt for 97.2% of questions. Adding
+  `HeuristicReranker` changes little overall (Recall@5 0.982, evidence in the prompt 97.8%).
+- **Prompt size**, one 273-turn conversation: full transcript grows to 119,553 tokens; the session
+  layer's prompt averages 2,191 tokens (max 3,215).
+- **Unrelated memory added** (100 questions sampled across types): Recall@5 0.96 with the question's
+  own history, 0.94 with as much again from other users, 0.90 with three times as much. With
+  embeddings 0.97 / 0.95 / 0.89, and 0.98 / 0.96 / 0.93 with the reranker. Recall@10 with embeddings
+  is still 0.95 at three times as much: the answer moves down the list rather than out of it.
+- **Time phrases in the question** (`--question-clock`): the runs above read a phrase such as "last
+  month" as of today. The data is from 2023, so the time window matched nothing and `query()`
+  ignored it. Read as of each question's own date, as live use would, the window is applied as a
+  filter whenever anything falls inside it, and an answer outside it is hidden. Recall@5 with
+  embeddings then falls from 0.984 to 0.972: 6 of the 36 questions with a time phrase are lost and
+  none gained. The filter applied here because every episode carries a date; blocks stored without
+  `happened_at` (the existing method) were unaffected. With `time_window="rank"` (see Changed) all
+  6 come back and nothing else moves: Recall@5 0.984, Recall@10 0.994, evidence in the prompt
+  97.2%; on the 36 questions Recall@5 goes from 77.8% to 94.4%. Keyword only: Recall@5 0.946 with
+  the filter, 0.956 with ranking. With unrelated memory added the same clock gives 0.97 / 0.95 /
+  0.90, against 0.96 / 0.92 / 0.87 with the filter. The filter's results are kept in the
+  `*_question_clock_filter.json` files.
+- **Crash consistency**, 400 commits killed at a random point (half with SQLite's `atomic()`, half
+  without): 0 partial saves, 0 duplicates after retry, 0 broken hash chains.
+
+### Not in this change
+- `AsyncMemBlock` has none of the above yet.
+- The PostgreSQL adapters are unchanged and the new features use only the existing adapter
+  contract, but they have not been run against a live PostgreSQL.
+- No answer-accuracy evaluation: that needs an LLM to answer and to judge.
+
+### Tests
+- New: `tests/test_transactions.py`, `tests/test_snapshot.py`, `tests/test_memory_session.py`,
+  `tests/test_experience.py` (106 tests) and `tests/test_time_window.py` (28 tests).
+- Changed: `TestInferredTemporalWindowFallback::test_window_with_matches_is_still_honoured` in
+  `tests/test_fts_ranking_e2e.py` asserted the filter; it now asserts the new default order and
+  the filter under `time_window="filter"`.
+- Full suite: 864 passed, 62 skipped (no PostgreSQL).
+
 ## v0.14.0
 
 ### Added — pluggable memory classifier (`MemBlock(classifier=...)`)

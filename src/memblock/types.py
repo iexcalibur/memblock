@@ -20,6 +20,8 @@ class BlockType(str, Enum):
     EVENT = "event"  # Something that happened: "Deployed v2.0 on March 10"
     ENTITY = "entity"  # A named thing: "Project Alpha", "React", "AWS"
     RELATION = "relation"  # A relationship description between entities
+    EPISODE = "episode"  # A verbatim message or document chunk, kept word for word
+    EXPERIENCE = "experience"  # Procedural guidance: when it applies, what to do, how to verify
 
 
 class SourceType(str, Enum):

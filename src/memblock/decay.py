@@ -21,6 +21,8 @@ from memblock.types import BlockType, now_utc
 #                 their minds; faster decay.
 #   EVENT       — point-in-time happenings ("user asked X yesterday").
 #                 Bounded relevance; fastest decay.
+#   EXPERIENCE  — procedural guidance learned from past runs. Stays
+#                 useful for a long time; slow decay.
 #
 # Callers can still override per-block via `store(decay_rate=...)`.
 # These tables only kick in when the caller leaves it as the default.
@@ -30,7 +32,13 @@ DEFAULT_DECAY_BY_TYPE: dict[BlockType, float] = {
     BlockType.RELATION:   0.005,
     BlockType.PREFERENCE: 0.020,
     BlockType.EVENT:      0.040,
+    BlockType.EXPERIENCE: 0.002,
 }
+
+# Types that never fade. An EPISODE is the verbatim record of what was said;
+# a rate of 0 keeps its strength at its confidence, so `prune()` never
+# removes it. Kept out of the table above, which ranks the types that do fade.
+NON_DECAYING_TYPES: frozenset[BlockType] = frozenset({BlockType.EPISODE})
 
 
 def default_decay_rate_for(block_type: BlockType | str) -> float:
@@ -41,6 +49,8 @@ def default_decay_rate_for(block_type: BlockType | str) -> float:
             block_type = BlockType(block_type)
         except ValueError:
             return DEFAULT_DECAY_BY_TYPE[BlockType.FACT]
+    if block_type in NON_DECAYING_TYPES:
+        return 0.0
     return DEFAULT_DECAY_BY_TYPE.get(
         block_type, DEFAULT_DECAY_BY_TYPE[BlockType.FACT],
     )

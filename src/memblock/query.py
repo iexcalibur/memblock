@@ -36,6 +36,61 @@ _STORAGE_SORT_FOR_TEXT_SEARCH: dict[str, str] = {
 _FTS_ONLY_RRF_K = 3
 
 
+# What query() does with a time window read out of the query text.
+TIME_WINDOW_MODES = ("rank", "filter")
+
+def infer_time_window(text_search: str | None) -> tuple[dict[str, Any], str | None]:
+    """Read a time phrase ("last week", "in March") out of a text query.
+
+    Returns `(window, cleaned)`: `window` holds `happened_after` and/or
+    `happened_before` and is empty when the text has no time phrase;
+    `cleaned` is the text with the phrase removed.
+    """
+    window: dict[str, Any] = {}
+    cleaned = text_search
+    if text_search:
+        try:
+            from memblock.temporal import TemporalQueryParser
+            constraint = TemporalQueryParser().parse(text_search)
+            if constraint is not None:
+                if constraint.after is not None:
+                    window["happened_after"] = constraint.after
+                if constraint.before is not None:
+                    window["happened_before"] = constraint.before
+                cleaned = constraint.cleaned_query or text_search
+        except ImportError:
+            pass
+    return window, cleaned
+
+
+def merge_time_window(
+    inside: list[tuple[Block, float]],
+    overall: list[tuple[Block, float]],
+) -> list[tuple[Block, float]]:
+    """Merge two rankings of one query: the blocks dated inside the inferred
+    time window, and all blocks whatever their date.
+
+    The two lists alternate, the window's block first, and a block already
+    placed is skipped. So the block ranked r-th overall is never placed later
+    than position 2r, wherever it is dated: the time phrase lifts memories
+    from that period without burying a strong match from outside it. A query
+    for N results holds the best N/2 from the window and the best N/2
+    overall.
+
+    (Adding the two lists' reciprocal ranks instead would count every block
+    in the window twice, since it is in both lists, and put most of the
+    window ahead of the best match outside it.)
+    """
+    merged: list[tuple[Block, float]] = []
+    placed: set[str] = set()
+    for rank in range(max(len(inside), len(overall))):
+        for ranked in (inside, overall):
+            if rank < len(ranked) and ranked[rank][0].id not in placed:
+                placed.add(ranked[rank][0].id)
+                merged.append(ranked[rank])
+    return merged
+
+
 def _block_matches_filters(block: Block, filters: dict) -> bool:
     """Apply the SQL-level filters to a block fetched outside the candidate
     query (vector-only hybrid hits, graph neighbours), so a session- or
@@ -115,6 +170,7 @@ class QueryEngine:
         project_id: str | None = None,
         agent_id: str | None = None,
         metadata_filters: dict[str, Any] | None = None,
+        time_window: str = "rank",
     ) -> list[Block]:
         """
         Query memory blocks with multiple filter dimensions.
@@ -133,26 +189,23 @@ class QueryEngine:
             include_decayed: Include blocks with low strength
             min_strength: Minimum decay-adjusted strength (0.0-1.0)
             semantic: Enable hybrid search (FTS + vector) when embeddings are available
+            time_window: What a time phrase in `text_search` ("last week",
+                "in March") does to relevance-sorted results. 'rank'
+                (default): memories dated inside that period are ranked
+                higher, and a strong match dated outside it is still
+                returned. 'filter': only memories dated inside the period are
+                returned, unless nothing at all falls inside it. Results
+                sorted by 'recency', 'access_count' or 'strength' are always
+                filtered.
 
         Returns:
             List of blocks, sorted by the specified criteria.
         """
+        if time_window not in TIME_WINDOW_MODES:
+            raise ValueError(f"time_window must be one of {TIME_WINDOW_MODES}, got {time_window!r}")
+
         # Temporal query parsing: extract time constraints before search
-        temporal_filters: dict[str, Any] = {}
-        cleaned_text_search = text_search
-        if text_search:
-            try:
-                from memblock.temporal import TemporalQueryParser
-                parser = TemporalQueryParser()
-                constraint = parser.parse(text_search)
-                if constraint is not None:
-                    if constraint.after is not None:
-                        temporal_filters["happened_after"] = constraint.after
-                    if constraint.before is not None:
-                        temporal_filters["happened_before"] = constraint.before
-                    cleaned_text_search = constraint.cleaned_query or text_search
-            except ImportError:
-                pass
+        temporal_filters, cleaned_text_search = infer_time_window(text_search)
 
         # Step 1: Get candidate blocks from storage
         # For text searches the storage layer ranks by full-text relevance
@@ -184,18 +237,75 @@ class QueryEngine:
             filters["agent_id"] = agent_id
         if metadata_filters:
             filters["metadata_filters"] = metadata_filters
-        # Add temporal filters
-        filters.update(temporal_filters)
 
+        # Steps 1b-4 (score and sort) run once, or twice when a time window
+        # inferred from the query text is used for ranking. The vector side
+        # of a hybrid search is computed once and shared.
+        options = dict(
+            text_search=text_search, cleaned_text_search=cleaned_text_search,
+            related_to=related_to, sort_by=sort_by, limit=limit, pool=pool,
+            include_decayed=include_decayed, min_strength=min_strength,
+            semantic=semantic, vector_memo={},
+        )
+        if not temporal_filters:
+            scored = self._ranked(filters, {}, False, **options)
+        elif time_window == "filter" or sort_by != "relevance":
+            scored = self._ranked(filters, temporal_filters, True, **options)
+        else:
+            # The window is a preference, not a filter: rank the blocks dated
+            # inside it, rank all blocks, and merge the two lists. An answer
+            # dated outside the window stays in the results.
+            inside = self._ranked(filters, temporal_filters, False, **options)
+            overall = self._ranked(filters, {}, False, **options)
+            scored = merge_time_window(inside, overall) if inside else overall
+
+        # Step 5: Rerank first (on wider pool), THEN apply limit
+        if text_search and self._reranker is not None:
+            try:
+                from memblock.rerankers import Reranker
+                if isinstance(self._reranker, Reranker):
+                    # Give reranker a wider pool for better results
+                    wider = [block for block, _ in scored[:limit * 3]]
+                    results = self._reranker.rerank(text_search, wider, limit)
+                    return results
+            except Exception:
+                pass  # reranker failure should not break queries
+
+        # Apply limit
+        results = [block for block, _ in scored[:limit]]
+        return results
+
+    def _ranked(
+        self,
+        filters: dict,
+        time_filters: dict,
+        relax_empty_window: bool,
+        *,
+        text_search: str | None,
+        cleaned_text_search: str | None,
+        related_to: str | None,
+        sort_by: str,
+        limit: int,
+        pool: int,
+        include_decayed: bool,
+        min_strength: float,
+        semantic: bool,
+        vector_memo: dict,
+    ) -> list[tuple[Block, float]]:
+        """Fetch candidates, score them and sort them: `(block, strength)`
+        pairs in result order, before the reranker and the limit.
+
+        `time_filters` is a window inferred from the query text. With
+        `relax_empty_window` it is dropped when it leaves no candidates at
+        all (every memory predates the window, or blocks carry no
+        happened_at) rather than returning nothing. Explicit filters are
+        never relaxed.
+        """
+        filters = {**filters, **time_filters}
         candidates = self.storage.query_blocks(filters)
 
-        # A temporal window inferred from the query text ("last week",
-        # "10 days ago") is advisory, not a user-supplied filter: if it
-        # leaves no candidates at all — every memory predates the window,
-        # or blocks carry no happened_at — retry without it rather than
-        # return nothing. Explicit filters are never relaxed.
-        if temporal_filters and not candidates:
-            for key in temporal_filters:
+        if time_filters and relax_empty_window and not candidates:
+            for key in time_filters:
                 filters.pop(key, None)
             candidates = self.storage.query_blocks(filters)
 
@@ -206,7 +316,7 @@ class QueryEngine:
             and semantic
             and self._embedding_provider is not None
         ):
-            hybrid_boost = self._hybrid_search(text_search, candidates, pool)
+            hybrid_boost = self._hybrid_search(text_search, candidates, pool, vector_memo)
 
         # Normalize hybrid scores to 0-1 range for meaningful relevance contribution
         if hybrid_boost:
@@ -321,21 +431,7 @@ class QueryEngine:
                 return (sem * 0.70) + (conf * 0.10) + (strength * 0.05) + (recency * 0.05) + (g_boost * 0.10)
             scored.sort(key=relevance_score, reverse=True)
 
-        # Step 5: Rerank first (on wider pool), THEN apply limit
-        if text_search and self._reranker is not None:
-            try:
-                from memblock.rerankers import Reranker
-                if isinstance(self._reranker, Reranker):
-                    # Give reranker a wider pool for better results
-                    wider = [block for block, _ in scored[:limit * 3]]
-                    results = self._reranker.rerank(text_search, wider, limit)
-                    return results
-            except Exception:
-                pass  # reranker failure should not break queries
-
-        # Apply limit
-        results = [block for block, _ in scored[:limit]]
-        return results
+        return scored
 
     def _fts_only_curve(self, candidates: list[Block]) -> dict[str, float]:
         """Relevance curve from the storage (bm25 / ts_rank) order alone.
@@ -362,55 +458,60 @@ class QueryEngine:
         query: str,
         fts_candidates: list[Block],
         limit: int,
+        memo: dict | None = None,
     ) -> dict[str, float]:
         """
         Run vector search and merge with FTS results using Weighted Reciprocal Rank Fusion.
 
-        Returns a dict of block_id -> RRF boost score.
+        Returns a dict of block_id -> RRF boost score. `memo` carries the
+        vector ranking between calls made for the same query, so the query is
+        embedded and the vectors are searched once.
         """
-        from memblock.embeddings import (
-            EmbeddingProvider,
-            brute_force_similarity,
-        )
+        from memblock.embeddings import EmbeddingProvider
 
         provider = self._embedding_provider
         if not isinstance(provider, EmbeddingProvider):
             return {}
 
         try:
-            # Embed the query
-            query_embeddings = provider.embed([query])
-            if not query_embeddings:
+            if memo is None:
+                memo = {}
+            if "vectors" not in memo:
+                memo["vectors"] = self._vector_ranking(provider, query, limit)
+            if memo["vectors"] is None:
                 return {}
-            query_vec = query_embeddings[0]
+            vec_ids, vec_scores = memo["vectors"]
 
             # FTS ranked list
             fts_ids = [b.id for b in fts_candidates[:limit]]
-
-            # Try server-side vector search first (pgvector)
-            from memblock.embeddings import pack_embedding
-            query_bytes = pack_embedding(query_vec)
-            server_results = self.storage.search_similar_embeddings(
-                query_bytes, limit
-            )
-            if server_results:
-                vec_ids = [bid for bid, _ in server_results]
-                vec_scores = {bid: score for bid, score in server_results}
-                merged = weighted_rrf_merge(fts_ids, vec_ids, vec_scores)
-                return dict(merged)
-
-            # Fallback: brute-force cosine similarity (numpy matmul when
-            # available, pure Python otherwise) — all rows, sorted desc.
-            all_embeddings = self.storage.get_all_embeddings()
-            if not all_embeddings:
-                return {}
-
-            vec_scored = brute_force_similarity(query_vec, all_embeddings)
-            vec_ids = [bid for bid, _ in vec_scored[:limit]]
-            vec_scores_map = dict(vec_scored)
-
-            merged = weighted_rrf_merge(fts_ids, vec_ids, vec_scores_map)
-            return dict(merged)
+            return dict(weighted_rrf_merge(fts_ids, vec_ids, vec_scores))
 
         except Exception:
             return {}
+
+    def _vector_ranking(
+        self, provider: Any, query: str, limit: int,
+    ) -> tuple[list[str], dict[str, float]] | None:
+        """The vector side of a hybrid search: block ids best first, and each
+        block's similarity. None when there is nothing to search."""
+        from memblock.embeddings import brute_force_similarity, pack_embedding
+
+        # Embed the query
+        query_embeddings = provider.embed([query])
+        if not query_embeddings:
+            return None
+        query_vec = query_embeddings[0]
+
+        # Try server-side vector search first (pgvector)
+        server_results = self.storage.search_similar_embeddings(pack_embedding(query_vec), limit)
+        if server_results:
+            return [bid for bid, _ in server_results], {bid: score for bid, score in server_results}
+
+        # Fallback: brute-force cosine similarity (numpy matmul when
+        # available, pure Python otherwise) — all rows, sorted desc.
+        all_embeddings = self.storage.get_all_embeddings()
+        if not all_embeddings:
+            return None
+
+        vec_scored = brute_force_similarity(query_vec, all_embeddings)
+        return [bid for bid, _ in vec_scored[:limit]], dict(vec_scored)

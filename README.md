@@ -66,6 +66,32 @@ block.metadata.custom_metadata["_classifier"]               # full audit of the 
 Explicit `store()` arguments always win over the classifier. See `memblock/classifier.py` for
 the contract and `CHANGELOG.md` for details.
 
+## Memory for any chat model
+
+`MemorySession` sits between your app and the model. Each turn it reads memory into the prompt,
+calls the model, then commits the finished turn to memory word for word and drops it from the
+prompt. The prompt stays small; nothing that was said is lost.
+
+```python
+from memblock import MemBlock, MemorySession
+
+def model(messages):                 # any model: take the messages, return the reply text
+    return my_llm_client.chat(messages)
+
+session = MemorySession(MemBlock(storage="sqlite:///memory.db"), model)
+
+session.chat("My kitten Memmy is three months old.", enable_memory=True)
+session.chat("How old is my kitten?")              # answered from memory
+
+session.ingest(long_document)                      # documents go in word for word too
+session.save_state("memory.snapshot.json")         # stamped snapshot; restore or fork later
+```
+
+Commits are all-or-nothing and safe to retry (`mem.transaction()`, receipts). Agents can reuse what
+earlier runs learned with `ExperienceBank` and `MemorySession(experience="on_trouble")`. See
+`memblock/session.py`, `memblock/transactions.py`, `memblock/snapshot.py` and
+`memblock/experience.py`. Sync API only for now.
+
 ## Async (asyncio)
 
 ```python

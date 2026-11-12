@@ -13,7 +13,7 @@ Usage:
     mem.verify()  # check tamper detection
 """
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 from memblock.block import Block
 from memblock.context import ContextBuilder
@@ -28,10 +28,14 @@ from memblock.errors import (
     DuplicateBlockError,
     EncryptionError,
     ExtractionError,
+    EmbeddingMismatchError,
     LicenseError,
     MemBlockError,
+    MemorySessionError,
     MigrationError,
+    SnapshotError,
     StorageError,
+    TransactionError,
     ValidationError,
 )
 from memblock.graph import GraphIndex
@@ -60,6 +64,9 @@ from memblock.temporal import TemporalQueryParser, TemporalConstraint
 from memblock.async_memblock import AsyncMemBlock
 from memblock.background import BackgroundExtractor
 from memblock.pool import AsyncMemBlockPool, MemBlockPool
+from memblock.transactions import ReceiptStatus, Transaction, TransactionStatus
+from memblock.session import MemorySession, ModelReply
+from memblock.experience import Experience, ExperienceBank, TroubleDetector
 
 __all__ = [
     "AnalyticsError",
@@ -86,6 +93,9 @@ __all__ = [
     "DuplicateBlockError",
     "DuplicatePolicy",
     "Edge",
+    "EmbeddingMismatchError",
+    "Experience",
+    "ExperienceBank",
     "EdgeRelation",
     "EncryptionError",
     "EncryptionLevel",
@@ -95,14 +105,19 @@ __all__ = [
     "HookManager",
     "LicenseError",
     "MemBlockError",
+    "MemorySession",
+    "MemorySessionError",
     "MigrationError",
+    "ModelReply",
     "MultiHopResult",
     "MultiHopRetriever",
     "OpAction",
     "OpLog",
     "Operation",
     "QueryEngine",
+    "ReceiptStatus",
     "SchemaValidationError",
+    "SnapshotError",
     "SourceType",
     "SQLiteAdapter",
     "StorageAdapter",
@@ -110,5 +125,9 @@ __all__ = [
     "TamperReport",
     "TemporalConstraint",
     "TemporalQueryParser",
+    "Transaction",
+    "TransactionError",
+    "TransactionStatus",
+    "TroubleDetector",
     "ValidationError",
 ]

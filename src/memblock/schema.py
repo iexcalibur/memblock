@@ -34,6 +34,8 @@ class BlockSchema:
         BlockType.EVENT: [None, BlockType.ENTITY, BlockType.EVENT],
         BlockType.ENTITY: [None, BlockType.ENTITY],
         BlockType.RELATION: [None, BlockType.ENTITY],
+        BlockType.EPISODE: [None, BlockType.EPISODE],
+        BlockType.EXPERIENCE: [None, BlockType.ENTITY],
     }
 
     # Edge relation constraints: which relations are valid between which types

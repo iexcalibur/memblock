@@ -56,11 +56,15 @@ class BlockStore:
         happened_at: Any | None = None,
         happened_at_end: Any | None = None,
         temporal_precision: str = "exact",
+        deleted: bool = False,
     ) -> Block:
         """
         Create a new memory block.
 
         Validates the block, logs the operation, and persists it.
+
+        `deleted=True` writes the block staged: stored, but invisible to
+        queries until a transaction publishes it (see `memblock.transactions`).
         """
         block = Block(
             id=generate_block_id(),
@@ -96,6 +100,7 @@ class BlockStore:
                 if type == BlockType.EVENT and happened_at is not None
                 else ContentHasher.hash(content)
             ),
+            deleted=deleted,
         )
 
         # Validate

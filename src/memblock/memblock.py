@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import uuid
+from enum import Enum
 from typing import Any
 
 from memblock.block import Block
@@ -11,22 +13,41 @@ from memblock.context import ContextBuilder
 from memblock.crypto import CryptoLayerWithPassphrase
 from memblock.decay import DecayEngine
 from memblock.dedup import ContentHasher, DuplicateChecker, DuplicatePolicy
-from memblock.errors import AnalyticsError, DuplicateBlockError, EncryptionError, ExtractionError, LicenseError
+from memblock.errors import (
+    AnalyticsError,
+    DuplicateBlockError,
+    EncryptionError,
+    ExtractionError,
+    LicenseError,
+    TransactionError,
+    ValidationError,
+)
 from memblock.background import BackgroundExtractor
 from memblock.hooks import EventType, HookManager
 from memblock.licensing import LicenseInfo, get_secret, get_stored_license, validate_license
 from memblock.graph import GraphIndex
 from memblock.ops import OpLog, TamperReport
 from memblock.query import QueryEngine
-from memblock.schema import SchemaValidationError
+from memblock.schema import BlockSchema, SchemaValidationError
 from memblock.storage.base import StorageAdapter
 from memblock.storage.sqlite import SQLiteAdapter
 from memblock.store import BlockStore
+from memblock.transactions import (
+    DEFAULT_LEASE_SECONDS,
+    RECEIPT_KEY,
+    TXN_KEY,
+    ReceiptStatus,
+    Transaction,
+    is_internal,
+    is_staged,
+    recover_transactions,
+)
 from memblock.types import (
     BlockType,
     EdgeRelation,
     EncryptionLevel,
     SourceType,
+    now_utc,
 )
 
 
@@ -101,6 +122,7 @@ class MemBlock:
         classifier: Any = None,
         classifier_conflicts: bool = True,
         classifier_escalate: bool = True,
+        on_embedding_mismatch: str = "error",
     ) -> None:
         """
         Initialize MemBlock.
@@ -175,6 +197,10 @@ class MemBlock:
                 your database. PostgreSQL only; ignored for SQLite (a local file
                 you own). When False, server-side pgvector search still works —
                 the adapter only runs a read-only capability check, not DDL.
+            on_embedding_mismatch: What to do when this store's vectors were made
+                by a different embedding model than the one configured here:
+                "error" (default) raises EmbeddingMismatchError on first use,
+                "warn" warns, "ignore" carries on (use it to call reembed()).
         """
         # ── License validation (disabled — re-enable for paid tier) ──
         # secret = get_secret()
@@ -264,6 +290,18 @@ class MemBlock:
         self._conflict_resolver = None  # Lazy-initialized
         self._extracting = False  # Prevents infinite recursion (sync mode, main thread)
         self._thread_local = threading.local()  # Per-thread extracting state
+
+        # Grouped writes (memblock/transactions.py): the open transaction is
+        # per thread, so another thread's writes are never staged by accident.
+        self._txn_local = threading.local()
+        self._txn_recovered = False
+        self._instance_id = uuid.uuid4().hex
+
+        # Embedding identity (memblock/snapshot.py): checked on first use.
+        if on_embedding_mismatch not in ("error", "warn", "ignore"):
+            raise ValueError("on_embedding_mismatch must be 'error', 'warn' or 'ignore'")
+        self._on_embedding_mismatch = on_embedding_mismatch
+        self._embedding_identity_checked = False
 
         # Auto-linking: automatically build knowledge graph edges during store()
         self._auto_link = False
@@ -492,6 +530,7 @@ class MemBlock:
         happened_at: Any | None = None,
         happened_at_end: Any | None = None,
         temporal_precision: str = "exact",
+        receipt: str | None = None,
     ) -> Block:
         """
         Store a new memory block.
@@ -517,10 +556,22 @@ class MemBlock:
             project_id: Project scope (overrides default)
             agent_id: Agent scope (overrides default)
             metadata: Arbitrary key-value metadata for filtering
+            receipt: A caller-chosen ID for this write. Storing again with a
+                receipt that was already applied returns the block written the
+                first time and writes nothing, so a retry cannot store twice.
+
+        Inside `with mem.transaction():` the block is written staged: it becomes
+        visible, together with the rest of the transaction, on publish.
 
         Returns:
             The created Block, or None if duplicate with SKIP policy.
         """
+        txn = self._current_txn()
+        if receipt is not None:
+            replay = self._receipt_replay(receipt, txn)
+            if replay is not None:
+                return replay
+
         # ── Pluggable classification (memblock/classifier.py) ──────────────────
         # Fills whatever the caller left unset. Explicit arguments always win.
         classifier_record: dict[str, Any] | None = None
@@ -669,18 +720,8 @@ class MemBlock:
                     existing.metadata.confidence = merged_confidence
                     return existing
 
-        # Encrypt if needed
-        stored_content = content
-        encrypted = False
-        if encryption_level != EncryptionLevel.NONE and self._crypto.enabled:
-            try:
-                stored_content = self._crypto.seal(content, encryption_level)
-            except Exception as e:
-                raise EncryptionError(f"Failed to encrypt block content: {e}") from e
-            encrypted = True
-
-        block = self._store.create(
-            content=stored_content,
+        block = self._create_block(
+            content,
             type=type,
             confidence=confidence,
             source=source,
@@ -693,31 +734,31 @@ class MemBlock:
             org_id=org_id or self._org_id,
             project_id=project_id or self._project_id,
             agent_id=agent_id or self._agent_id,
-            custom_metadata=metadata,
+            metadata=metadata,
             happened_at=happened_at,
             happened_at_end=happened_at_end,
             temporal_precision=temporal_precision,
+            receipt=receipt,
+            txn=txn,
         )
 
-        if encrypted:
-            self._storage.update_block(block.id, {"encrypted": True})
-            block.encrypted = True
+        def _announce() -> None:
+            # Fire on_add hooks
+            self._hooks.emit(EventType.ON_ADD, {
+                "block_id": block.id,
+                "block": block,
+                "content": content,
+                "type": type.value,
+            })
+            # Auto-link: build knowledge graph edges automatically
+            self._auto_link_block(block, tags)
 
-        # Generate and store embedding (if provider available)
-        # Use original plaintext content for embedding, not encrypted content
-        if self._embedding_provider is not None:
-            self._embed_block(block.id, content)
-
-        # Fire on_add hooks
-        self._hooks.emit(EventType.ON_ADD, {
-            "block_id": block.id,
-            "block": block,
-            "content": content,
-            "type": type.value,
-        })
-
-        # Auto-link: build knowledge graph edges automatically
-        self._auto_link_block(block, tags)
+        # A staged block is not visible yet: hooks and the auto-linker hear
+        # about it when its transaction publishes.
+        if txn is not None:
+            txn._on_publish(_announce)
+        else:
+            _announce()
 
         # Auto-extract additional memories from the content
         # Use thread-local flag to prevent recursive extraction
@@ -729,7 +770,7 @@ class MemBlock:
             and not self._extracting
             and self._extract_provider_name is not None
         ):
-            if self._background_extract and self._bg_extractor is not None:
+            if self._background_extract and self._bg_extractor is not None and txn is None:
                 # Background mode: submit to thread pool, return immediately
                 def _extract_fn(text: str) -> Any:
                     self._thread_local.extracting = True
@@ -786,7 +827,14 @@ class MemBlock:
         return block
 
     def update(self, block_id: str, **updates: Any) -> Block | None:
-        """Update a block's fields."""
+        """Update a block's fields.
+
+        Inside a transaction a change to an existing block is held back and
+        applied on publish; the block returned is the one as it stands now.
+        """
+        txn = self._current_txn()
+        if txn is not None and block_id not in txn._staged:
+            return self._defer_update(txn, block_id, updates)
         # If updating content and block is encrypted, encrypt the new content
         original_content = updates.get("content")
         if "content" in updates:
@@ -813,7 +861,10 @@ class MemBlock:
         return result
 
     def delete(self, block_id: str, cascade: bool = False) -> bool:
-        """Soft-delete a block."""
+        """Soft-delete a block. Inside a transaction it is applied on publish."""
+        txn = self._current_txn()
+        if txn is not None:
+            return self._defer_delete(txn, block_id, cascade)
         result = self._store.delete(block_id, cascade=cascade)
         # Remove embedding on delete
         if result:
@@ -830,6 +881,10 @@ class MemBlock:
         for the contract. Irreversible. Required for GDPR / India
         DPDP "right to be forgotten" — soft-delete keeps the row
         for audit; only hard-delete removes the data."""
+        if self._current_txn() is not None:
+            raise TransactionError(
+                "hard_delete() is permanent and cannot be part of a transaction"
+            )
         block = self._storage.get_block(block_id)
         if block is None:
             return False
@@ -874,7 +929,10 @@ class MemBlock:
         set, optionally including soft-deleted rows for audit /
         disclosure flows.
         """
-        blocks = self._storage.get_all_blocks(include_deleted=include_deleted)
+        blocks = [
+            b for b in self._storage.get_all_blocks(include_deleted=include_deleted)
+            if not is_internal(b) and not is_staged(b)
+        ]
         # Sort newest-first for the disclosure UI.
         try:
             blocks.sort(
@@ -899,6 +957,10 @@ class MemBlock:
         """Create a relationship between two blocks."""
         if isinstance(relation, str):
             relation = EdgeRelation(relation)
+        txn = self._current_txn()
+        if txn is not None:
+            self._defer_link(txn, source_id, target_id, relation, weight)
+            return
         self._graph.link(source_id, target_id, relation, weight)
 
     def unlink(
@@ -910,6 +972,15 @@ class MemBlock:
         """Remove relationship(s) between two blocks."""
         if isinstance(relation, str):
             relation = EdgeRelation(relation)
+        txn = self._current_txn()
+        if txn is not None:
+            txn._defer({
+                "op": "unlink",
+                "source_id": source_id,
+                "target_id": target_id,
+                "relation": relation.value if relation is not None else None,
+            })
+            return 0  # the count is known once the transaction publishes
         return self._graph.unlink(source_id, target_id, relation)
 
     def neighbors(self, block_id: str, relation: EdgeRelation | None = None) -> list[Block]:
@@ -939,6 +1010,7 @@ class MemBlock:
         project_id: str | None = None,
         agent_id: str | None = None,
         metadata_filters: dict[str, Any] | None = None,
+        time_window: str = "rank",
     ) -> list[Block]:
         """
         Query memory blocks with structured filters.
@@ -965,10 +1037,20 @@ class MemBlock:
             project_id: Filter by project (overrides default)
             agent_id: Filter by agent (overrides default)
             metadata_filters: Arbitrary key-value filters on custom metadata
+            time_window: What a time phrase in `text_search` ("last week",
+                "in March") does to relevance-sorted results. 'rank'
+                (default): memories dated inside that period are ranked
+                higher, and a strong match dated outside it is still
+                returned. 'filter': only memories dated inside the period are
+                returned, unless nothing at all falls inside it. Results
+                sorted by 'recency', 'access_count' or 'strength' are always
+                filtered.
 
         Returns:
             List of matching blocks.
         """
+        if text_search and semantic and self._embedding_provider is not None:
+            self._ensure_embedding_identity()
         return self._query.query(
             type=type,
             tags=tags,
@@ -985,6 +1067,7 @@ class MemBlock:
             project_id=project_id or self._project_id,
             agent_id=agent_id or self._agent_id,
             metadata_filters=metadata_filters,
+            time_window=time_window,
         )
 
     def multi_hop_query(
@@ -1395,6 +1478,457 @@ class MemBlock:
 
         return result
 
+    # ─── Grouped Writes, Receipts ─────────────────────────────────────────
+
+    def transaction(self, ttl: float = DEFAULT_LEASE_SECONDS) -> Transaction:
+        """
+        Group writes so they become visible together, or not at all.
+
+            with mem.transaction():
+                mem.store("User moved to Berlin")
+                mem.store("User works at Acme")
+
+        New blocks are written staged (stored, invisible to queries); changes to
+        existing blocks are held back. Leaving the block publishes everything;
+        an exception discards everything. Calling this while a transaction is
+        already open on this thread joins that transaction.
+
+        See `memblock.transactions` for how this stays all-or-nothing across a
+        crash on every storage backend.
+        """
+        current = self._current_txn()
+        if current is not None:
+            return current
+        return Transaction(self, ttl=ttl)
+
+    def recover_transactions(self, force: bool = False) -> dict[str, int]:
+        """
+        Finish or discard transactions a crash left behind.
+
+        Runs by itself the first time this instance opens a transaction. A
+        transaction that reached its commit point is completed; one that did not
+        is discarded once its lease has expired (`force=True` discards it now).
+        """
+        return recover_transactions(self, force=force)
+
+    def receipt_status(self, receipt: str) -> ReceiptStatus:
+        """Where the write stored under this receipt stands: applied (visible),
+        pending (staged in an open transaction) or unknown (nothing stored)."""
+        found = self._storage.query_blocks(
+            {"deleted": True, "metadata_filters": {RECEIPT_KEY: receipt}, "limit": 5}
+        )
+        found = [b for b in found if (b.metadata.custom_metadata or {}).get(RECEIPT_KEY) == receipt]
+        if any(not b.deleted for b in found):
+            return ReceiptStatus.APPLIED
+        if any(is_staged(b) for b in found):
+            return ReceiptStatus.PENDING
+        return ReceiptStatus.UNKNOWN
+
+    def _current_txn(self) -> Transaction | None:
+        return getattr(self._txn_local, "txn", None)
+
+    def _txn_enter(self, txn: Transaction) -> None:
+        if self._current_txn() is not None:
+            raise TransactionError("A transaction is already open on this thread")
+        self._txn_local.txn = txn
+
+    def _txn_exit(self, txn: Transaction) -> None:
+        if self._current_txn() is txn:
+            self._txn_local.txn = None
+
+    def _recover_once(self) -> None:
+        if self._txn_recovered:
+            return
+        self._txn_recovered = True
+        try:
+            recover_transactions(self)
+        except Exception:
+            pass  # recovery can be retried; it must not block new work
+
+    def _plaintext(self, block: Block) -> str | None:
+        """A block's readable content, or None when it is sealed and this
+        instance cannot open it."""
+        if not block.encrypted:
+            return block.content
+        if not self._crypto.enabled:
+            return None
+        try:
+            return self._crypto.open(block.content, block.encryption_level)
+        except Exception:
+            return None
+
+    def _reveal(self, block: Block) -> Block:
+        """A copy of the block with readable content where this instance can open it."""
+        text = self._plaintext(block)
+        if text is None or text == block.content:
+            return block
+        shown = Block.from_dict(block.to_dict())
+        shown.content = text
+        return shown
+
+    def _receipt_replay(self, receipt: str, txn: Transaction | None) -> Block | None:
+        """The block already written under this receipt, if there is one."""
+        if not isinstance(receipt, str) or not receipt:
+            raise ValidationError("receipt must be a non-empty string")
+        if txn is not None and txn.receipts.get(receipt) == ReceiptStatus.APPLIED:
+            for block_id in txn._staged:
+                staged = self._storage.get_block(block_id)
+                if staged is not None and (staged.metadata.custom_metadata or {}).get(RECEIPT_KEY) == receipt:
+                    return self._reveal(staged)
+        found = self._storage.query_blocks({"metadata_filters": {RECEIPT_KEY: receipt}, "limit": 1})
+        for block in found:
+            if (block.metadata.custom_metadata or {}).get(RECEIPT_KEY) == receipt:
+                return self._reveal(block)
+        return None
+
+    def _create_block(
+        self,
+        content: str,
+        *,
+        type: BlockType,
+        confidence: float,
+        source: SourceType,
+        tags: list[str] | None,
+        parent_id: str | None,
+        encryption_level: EncryptionLevel,
+        decay_rate: float,
+        ttl: int | None,
+        session_id: str | None,
+        org_id: str | None,
+        project_id: str | None,
+        agent_id: str | None,
+        metadata: dict[str, Any] | None,
+        happened_at: Any | None,
+        happened_at_end: Any | None,
+        temporal_precision: str,
+        receipt: str | None,
+        txn: Transaction | None,
+    ) -> Block:
+        """Encrypt, persist and embed one block. Inside a transaction the block
+        is written staged and published with the rest."""
+        if self._embedding_provider is not None:
+            self._ensure_embedding_identity()
+
+        custom = dict(metadata) if metadata else None
+        if receipt is not None or txn is not None:
+            custom = custom or {}
+            if receipt is not None:
+                custom[RECEIPT_KEY] = receipt
+            if txn is not None:
+                custom[TXN_KEY] = txn.id
+        if txn is not None and receipt is not None:
+            txn._receipt(receipt, ReceiptStatus.PENDING)
+
+        try:
+            # Encrypt if needed
+            stored_content = content
+            encrypted = False
+            if encryption_level != EncryptionLevel.NONE and self._crypto.enabled:
+                try:
+                    stored_content = self._crypto.seal(content, encryption_level)
+                except Exception as e:
+                    raise EncryptionError(f"Failed to encrypt block content: {e}") from e
+                encrypted = True
+
+            block = self._store.create(
+                content=stored_content,
+                type=type,
+                confidence=confidence,
+                source=source,
+                tags=tags,
+                parent_id=parent_id,
+                encryption_level=encryption_level,
+                decay_rate=decay_rate,
+                ttl=ttl,
+                session_id=session_id,
+                org_id=org_id,
+                project_id=project_id,
+                agent_id=agent_id,
+                custom_metadata=custom,
+                happened_at=happened_at,
+                happened_at_end=happened_at_end,
+                temporal_precision=temporal_precision,
+                deleted=txn is not None,
+            )
+
+            if encrypted:
+                self._storage.update_block(block.id, {"encrypted": True})
+                block.encrypted = True
+
+            # Generate and store embedding (if provider available)
+            # Use original plaintext content for embedding, not encrypted content
+            if self._embedding_provider is not None:
+                self._embed_block(block.id, content)
+        except BaseException:
+            if txn is not None and receipt is not None:
+                txn._receipt(receipt, ReceiptStatus.ABORTED)
+            raise
+
+        if txn is not None:
+            txn._stage(block.id)
+            if receipt is not None:
+                txn._receipt(receipt, ReceiptStatus.APPLIED)
+        return block
+
+    def _defer_update(self, txn: Transaction, block_id: str, updates: dict[str, Any]) -> Block | None:
+        block = self._store.get_without_touch(block_id)
+        if block is None:
+            return None
+        plain = updates.get("content")
+        held: dict[str, Any] = {}
+        for key, value in updates.items():
+            if key == "content" and block.encrypted and self._crypto.enabled:
+                value = self._crypto.seal(value, block.encryption_level)
+            held[key] = value.value if isinstance(value, Enum) else value
+        txn._defer({"op": "update", "block_id": block_id, "updates": held})
+
+        def _after() -> None:
+            # A sealed block's new vector needs the plain text, which only this
+            # process has; an unsealed one is re-embedded when the change is applied.
+            if plain is not None and block.encrypted and self._embedding_provider is not None:
+                self._embed_block(block_id, plain)
+            fresh = self._store.get_without_touch(block_id)
+            if fresh is not None:
+                self._hooks.emit(EventType.ON_UPDATE, {
+                    "block_id": block_id,
+                    "block": fresh,
+                    "updates": updates,
+                })
+
+        txn._on_publish(_after)
+        return block
+
+    def _defer_delete(self, txn: Transaction, block_id: str, cascade: bool) -> bool:
+        block = self._storage.get_block(block_id)
+        if block is None:
+            return False
+        if block_id in txn._staged:
+            # Written by this transaction and seen by nobody else: drop it now.
+            self._storage.delete_embedding(block_id)
+            self._storage.delete_edges_for_block(block_id)
+            self._storage.delete_block(block_id)
+            txn._staged.remove(block_id)
+            return True
+        txn._defer({"op": "delete", "block_id": block_id, "cascade": cascade})
+        txn._on_publish(lambda: self._hooks.emit(EventType.ON_DELETE, {
+            "block_id": block_id,
+            "cascade": cascade,
+        }))
+        return True
+
+    def _defer_link(
+        self,
+        txn: Transaction,
+        source_id: str,
+        target_id: str,
+        relation: EdgeRelation,
+        weight: float,
+    ) -> None:
+        # Check now what the graph would check on publish, so a bad link is
+        # refused while the transaction can still be aborted.
+        source = self._storage.get_block(source_id)
+        target = self._storage.get_block(target_id)
+        if source is None:
+            raise ValueError(f"Source block {source_id} not found")
+        if target is None:
+            raise ValueError(f"Target block {target_id} not found")
+        BlockSchema.validate_edge(relation, source.type, target.type)
+        txn._defer({
+            "op": "link",
+            "source_id": source_id,
+            "target_id": target_id,
+            "relation": relation.value,
+            "weight": weight,
+        })
+
+    # ─── Verbatim Episodes ────────────────────────────────────────────────
+
+    def store_episode(
+        self,
+        content: str,
+        role: str = "user",
+        session_id: str | None = None,
+        turn: int | None = None,
+        seq: int | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        happened_at: Any | None = None,
+        encryption_level: EncryptionLevel | None = None,
+        org_id: str | None = None,
+        project_id: str | None = None,
+        agent_id: str | None = None,
+        receipt: str | None = None,
+    ) -> Block:
+        """
+        Store one message or document chunk word for word.
+
+        An episode is the record of what was actually said, so it skips
+        everything that could change or drop it: the classifier, conflict
+        resolution, deduplication and extraction. It never decays, so `prune()`
+        never removes it. Facts extracted from it should link back with
+        `EdgeRelation.DERIVED_FROM`.
+
+        Args:
+            content: The exact text.
+            role: Who said it: "user", "assistant", "tool", "system", "document".
+            session_id: The conversation it belongs to.
+            turn: The turn number within the session.
+            seq: The message's position within the turn.
+            receipt: See `store()`.
+        """
+        if not isinstance(content, str) or not content.strip():
+            raise ValidationError("An episode needs non-empty content")
+        txn = self._current_txn()
+        if receipt is not None:
+            replay = self._receipt_replay(receipt, txn)
+            if replay is not None:
+                return replay
+
+        meta = dict(metadata or {})
+        meta["_role"] = role
+        if turn is not None:
+            meta["_turn"] = turn
+        if seq is not None:
+            meta["_seq"] = seq
+
+        block = self._create_block(
+            content,
+            type=BlockType.EPISODE,
+            confidence=1.0,
+            source=SourceType.EXPLICIT if role in ("user", "document") else SourceType.OBSERVED,
+            tags=tags,
+            parent_id=None,
+            encryption_level=encryption_level or EncryptionLevel.NONE,
+            decay_rate=0.0,
+            ttl=None,
+            session_id=session_id or self._session_id,
+            org_id=org_id or self._org_id,
+            project_id=project_id or self._project_id,
+            agent_id=agent_id or self._agent_id,
+            metadata=meta,
+            happened_at=happened_at if happened_at is not None else now_utc(),
+            happened_at_end=None,
+            temporal_precision="exact",
+            receipt=receipt,
+            txn=txn,
+        )
+
+        def _announce() -> None:
+            self._hooks.emit(EventType.ON_ADD, {
+                "block_id": block.id,
+                "block": block,
+                "content": content,
+                "type": BlockType.EPISODE.value,
+            })
+
+        if txn is not None:
+            txn._on_publish(_announce)
+        else:
+            _announce()
+        return block
+
+    # ─── Snapshots ────────────────────────────────────────────────────────
+
+    def snapshot(
+        self,
+        path: str,
+        session_id: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Save this memory to one file: the whole store, or one session's blocks.
+
+        The file carries a stamp (format, checksum, embedding model). Returns
+        the stamp with `path` added. See `memblock.snapshot`.
+        """
+        from memblock.snapshot import write_snapshot
+        return write_snapshot(self, path, session_id=session_id, overwrite=overwrite)
+
+    def restore(
+        self,
+        path: str,
+        mode: str = "empty",
+        embeddings: str = "strict",
+    ) -> dict[str, Any]:
+        """
+        Load a snapshot into this store.
+
+        mode="empty" (default) needs a store with no blocks and keeps the
+        original history; mode="merge" adds to what is here. A snapshot whose
+        checksum fails, or whose vectors were made by a different embedding
+        model, is refused (`embeddings="drop"` or `"reembed"` takes the blocks
+        without the foreign vectors). See `memblock.snapshot`.
+        """
+        from memblock.snapshot import restore_snapshot
+        return restore_snapshot(self, path, mode=mode, embeddings=embeddings)
+
+    def fork(self, storage: str, **kwargs: Any) -> "MemBlock":
+        """
+        Copy this memory into a new, independent store and return it.
+
+        `storage` is the new store's URI and must be empty. Other keyword
+        arguments go to the new `MemBlock`; the embedding provider is carried
+        over unless you pass one. Sealed content is copied sealed, so pass the
+        same `encryption_key` to read it in the copy.
+        """
+        import os
+        import tempfile
+
+        kwargs.setdefault("embeddings", self._embedding_provider or False)
+        kwargs.setdefault("user_id", self._user_id)
+        descriptor, path = tempfile.mkstemp(prefix="memblock-fork-", suffix=".json")
+        os.close(descriptor)
+        try:
+            self.snapshot(path, overwrite=True)
+            copy = MemBlock(storage=storage, **kwargs)
+            try:
+                copy.restore(path)
+            except BaseException:
+                copy.close()
+                raise
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        return copy
+
+    def embedding_identity(self) -> str | None:
+        """The embedding model this instance is configured with, as recorded in
+        snapshot stamps and in the store. None when embeddings are off."""
+        from memblock.snapshot import embedding_identity
+        return embedding_identity(self._embedding_provider)
+
+    def reembed(self) -> int:
+        """
+        Rebuild every vector with this instance's embedding model and record
+        that model as the store's. Use after changing embedding models (open
+        the store with `on_embedding_mismatch="ignore"`). Returns the number of
+        blocks embedded; sealed blocks this instance cannot open are skipped.
+        """
+        if self._embedding_provider is None:
+            return 0
+        from memblock.snapshot import embedding_identity, write_manifest
+        count = 0
+        for block in self._storage.get_all_blocks():
+            if is_internal(block):
+                continue
+            text = self._plaintext(block)
+            if text is None:
+                continue
+            self._embed_block(block.id, text)
+            count += 1
+        write_manifest(self, embedding_identity(self._embedding_provider))
+        self._embedding_identity_checked = True
+        return count
+
+    def _ensure_embedding_identity(self) -> None:
+        if self._embedding_identity_checked:
+            return
+        from memblock.snapshot import check_embedding_identity
+        check_embedding_identity(self, self._on_embedding_mismatch)
+        self._embedding_identity_checked = True
+
     # ─── Integrity ────────────────────────────────────────────────────────
 
     def verify(self) -> TamperReport:
@@ -1558,7 +2092,10 @@ class MemBlock:
     def stats(self) -> dict[str, Any]:
         """Get statistics about the memory store."""
         blocks = self._storage.get_all_blocks()
-        all_blocks = self._storage.get_all_blocks(include_deleted=True)
+        all_blocks = [
+            b for b in self._storage.get_all_blocks(include_deleted=True)
+            if not is_internal(b)
+        ]
 
         type_counts: dict[str, int] = {}
         for b in blocks:

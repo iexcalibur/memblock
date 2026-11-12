@@ -429,9 +429,14 @@ class TestInferredTemporalWindowFallback:
         try:
             recent = mem.store("I bought a kettle for the kitchen", type=BlockType.FACT, happened_at=now_utc() - timedelta(days=2))
             stale = mem.store("I bought a toaster for the kitchen", type=BlockType.FACT, happened_at=now_utc() - timedelta(days=400))
-            results = mem.query(text_search="what did I buy for the kitchen last week", limit=5)
-            ids = [b.id for b in results]
-            assert ids == [recent.id], ids  # the stale block is outside the window
+            question = "what did I buy for the kitchen last week"
+            # The block inside the window ranks first; the stale one, outside
+            # it, is still returned (time_window="rank", the default).
+            ids = [b.id for b in mem.query(text_search=question, limit=5)]
+            assert ids == [recent.id, stale.id], ids
+            # time_window="filter" returns only what falls inside the window.
+            ids = [b.id for b in mem.query(text_search=question, limit=5, time_window="filter")]
+            assert ids == [recent.id], ids
         finally:
             mem.close()
 
